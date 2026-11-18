@@ -75,6 +75,7 @@ function parseHash() {
   const dm = /^#d-([a-z0-9]{4,20})$/.exec(location.hash || "");
   if (dm) return { name: "draft", id: dm[1] };
   if (location.hash === "#newd") return { name: "newdraft", id: null };
+  if (location.hash === "#signup") { if (!S.me) S.authMode = "register"; return { name: "home" }; }
   return { name: "home" };
 }
 function go(hash) { if (location.hash === hash || (!location.hash && hash === "#")) onRoute(); else location.hash = hash; }
@@ -981,6 +982,7 @@ function openNewChoice() {
     S.authReady = true;
     const prev = S.me;
     S.user = u; S.me = u ? u.uid : null;
+    if (u && location.hash === "#signup") { try { history.replaceState(null, "", location.pathname); } catch {} S.route = { name: "home" }; }
     if (u) S.myNick = u.displayName || lsGet("sukbingo.nick") || S.myNick || "";
     if (S.me !== prev) {
       stopSubs(); stopDraftSubs(); if (S.boardsUnsub) { S.boardsUnsub(); S.boardsUnsub = null; } if (S.draftsUnsub) { S.draftsUnsub(); S.draftsUnsub = null; }
