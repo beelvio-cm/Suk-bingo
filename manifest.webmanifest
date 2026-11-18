@@ -1,0 +1,17 @@
+{
+  "name": "SUK Bingo",
+  "short_name": "SUK Bingo",
+  "description": "Bingo a eventi da giocare con gli amici",
+  "lang": "it",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f4f2ee",
+  "theme_color": "#3b3388",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

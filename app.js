@@ -1,0 +1,584 @@
+import { firebaseConfig } from "./config.js";
+
+const FB = "https://www.gstatic.com/firebasejs/10.12.2/";
+
+const SAMPLE_TITLE = "SUK Bingo";
+const SAMPLE = ["Promising Future che gira Aurora","SUK mirror match","Turno 3 Aurora","MASTER YI","Oppo con fatine","Judge call con Peppe","Volpe e Bellows","Feature match","Partita ai turni","Oppo non si presenta","Onslaught + punch first","Triplo defy in un turno","Stacked into Nocturne turno 1","IVERN","Decree incident","Newrof nominato ma non dai","Falling Star prese 6+ in match","Baron scam a 5","Oppo con Legend signed o metallica","Partita contro pro o content creator","Oppo con mazzo full cinese","Decreto del colore opposto preso","REK'SAI che gira doppio under Titan","Baron scam di Harrowing","Partita contro donna"];
+
+const LINES = [];
+for (let r = 0; r < 5; r++) LINES.push({ k: "r" + r, cells: [0,1,2,3,4].map(c => r * 5 + c), label: "riga " + (r + 1) });
+for (let c = 0; c < 5; c++) LINES.push({ k: "c" + c, cells: [0,1,2,3,4].map(r => r * 5 + c), label: "colonna " + "BINGO"[c] });
+LINES.push({ k: "d0", cells: [0,6,12,18,24], label: "diagonale" });
+LINES.push({ k: "d1", cells: [4,8,12,16,20], label: "diagonale" });
+const BALL_COLORS = ["#e2483d", "#f2a823", "#1fb978", "#2f7de1", "#8a4be0"];
+const PLAYER_COLORS = ["#d4553f", "#2f7de1", "#8a4be0", "#1a9e6a", "#d98a12", "#c2407f", "#2b9bb0", "#6b5bd6", "#8c6a3f", "#4f7a28"];
+
+let F = {};          // firebase functions
+let auth, fdb;       // firebase instances
+const S = {
+  ready: false, configured: true, authReady: false, user: null, me: null,
+  boards: [], boardsLoaded: false, boardsUnsub: null,
+  route: { name: "home" },
+  board: null, boardLoaded: false, players: {}, playersLoaded: false,
+  unsubs: [], prevLines: {}, primed: false, winCells: new Set(),
+  myMarks: null, myNick: "", writing: false, dirty: false,
+  popCell: -1, slow: false, joinedChecked: false, authMode: "login", authErr: "",
+};
+
+const $app = document.getElementById("app");
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  if (attrs) for (const [k, v] of Object.entries(attrs)) {
+    if (v == null || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "style") el.setAttribute("style", v);
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid.nodeType ? kid : String(kid));
+  return el;
+}
+const lsGet = k => { try { return localStorage.getItem(k); } catch { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
+function toast(msg) {
+  document.querySelectorAll(".toast").forEach(t => t.remove());
+  const t = h("div", { class: "toast", role: "status" }, msg);
+  document.body.append(t); setTimeout(() => t.remove(), 2800);
+}
+function initials(nick) { const p = (nick || "?").trim(); return p ? [...p][0].toUpperCase() : "?"; }
+function sizeClass(t) { const n = (t || "").length; return n <= 12 ? "s-xl" : n <= 24 ? "s-l" : n <= 40 ? "s-m" : "s-s"; }
+function newId() { const a = "abcdefghijkmnpqrstuvwxyz23456789"; let s = ""; for (let i = 0; i < 10; i++) s += a[Math.floor(Math.random() * a.length)]; return s; }
+function shuffle(arr) { const a = arr.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+function completed(marks) { const s = new Set(marks || []); return LINES.filter(l => l.cells.every(c => s.has(c))); }
+function colorOf(uid) { let x = 0; for (const ch of uid || "") x = (x * 31 + ch.charCodeAt(0)) >>> 0; return PLAYER_COLORS[x % PLAYER_COLORS.length]; }
+function fmtTime(ts) { if (!ts) return ""; return new Date(ts).toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" }); }
+function authErrMsg(e) {
+  const c = (e && e.code) || "";
+  if (c.includes("invalid-credential") || c.includes("wrong-password") || c.includes("user-not-found")) return "Email o password non corrette.";
+  if (c.includes("email-already-in-use")) return "Esiste già un account con questa email. Prova ad accedere.";
+  if (c.includes("weak-password")) return "La password deve avere almeno 6 caratteri.";
+  if (c.includes("invalid-email")) return "L'indirizzo email non è valido.";
+  if (c.includes("popup-closed") || c.includes("cancelled-popup")) return "";
+  if (c.includes("unauthorized-domain")) return "Questo sito non è ancora autorizzato in Firebase (Authentication → Impostazioni → Domini autorizzati).";
+  if (c.includes("operation-not-allowed")) return "Questo metodo di accesso non è attivo nel progetto Firebase.";
+  if (c.includes("network")) return "Connessione assente. Riprova.";
+  if (c.includes("too-many-requests")) return "Troppi tentativi. Aspetta qualche minuto.";
+  return "Accesso non riuscito. Riprova.";
+}
+
+/* ---------- Routing ---------- */
+function parseHash() {
+  const m = /^#b-([a-z0-9]{4,20})$/.exec(location.hash || "");
+  if (m) return { name: "board", id: m[1] };
+  const e = /^#edit-([a-z0-9]{4,20})$/.exec(location.hash || "");
+  if (e) return { name: "edit", id: e[1] };
+  if (location.hash === "#new") return { name: "edit", id: null };
+  return { name: "home" };
+}
+function go(hash) { if (location.hash === hash || (!location.hash && hash === "#")) onRoute(); else location.hash = hash; }
+function boardLink(id) { return location.origin + location.pathname + "#b-" + id; }
+function stopSubs() { S.unsubs.forEach(u => { try { u(); } catch {} }); S.unsubs = []; }
+
+function onRoute() {
+  const r = parseHash();
+  const sameBoard = S.route.id && r.id === S.route.id;
+  S.route = r;
+  if (!sameBoard) {
+    stopSubs();
+    S.board = null; S.boardLoaded = false; S.players = {}; S.playersLoaded = false;
+    S.prevLines = {}; S.primed = false; S.myMarks = null; S.winCells = new Set(); S.joinedChecked = false;
+    if (r.id && S.me) subscribeBoard(r.id);
+  }
+  closeParty(); closeSheet();
+  window.scrollTo(0, 0);
+  render();
+}
+window.addEventListener("hashchange", onRoute);
+
+/* ---------- Data ---------- */
+function subscribeBoards() {
+  if (S.boardsUnsub) S.boardsUnsub();
+  S.boardsLoaded = false;
+  const q = F.query(F.collection(fdb, "boards"), F.where("members", "array-contains", S.me));
+  S.boardsUnsub = F.onSnapshot(q, snap => {
+    S.boards = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    S.boardsLoaded = true;
+    if (S.route.name === "home") render();
+  }, err => { console.error(err); S.boardsLoaded = true; S.boards = []; render(); });
+}
+
+function subscribeBoard(id) {
+  const t = setTimeout(() => { S.slow = true; render(); }, 10000);
+  const u1 = F.onSnapshot(F.doc(fdb, "boards", id), d => {
+    clearTimeout(t); S.slow = false;
+    S.board = d.exists() ? { id, ...d.data() } : null;
+    S.boardLoaded = true;
+    if (S.board && !d.metadata.fromCache && !S.joinedChecked) {
+      S.joinedChecked = true;
+      if (!(S.board.members || []).includes(S.me)) {
+        F.updateDoc(F.doc(fdb, "boards", id), { members: F.arrayUnion(S.me) }).catch(e => console.warn("join", e));
+      }
+    }
+    render();
+  }, err => { console.error(err); clearTimeout(t); S.boardLoaded = true; S.board = null; render(); });
+  const u2 = F.onSnapshot(F.collection(fdb, "boards", id, "players"), snap => {
+    const players = {};
+    snap.docs.forEach(d => { players[d.id] = d.data(); });
+    S.players = players;
+    S.playersLoaded = true;
+    if (players[S.me] && S.myMarks === null) S.myMarks = new Set(players[S.me].marks || []);
+    if (players[S.me] && players[S.me].nick) S.myNick = players[S.me].nick;
+    detectBingos(snap.metadata.fromCache);
+    render();
+  }, err => { console.error(err); S.playersLoaded = true; render(); });
+  S.unsubs.push(u1, u2);
+}
+
+function detectBingos(fromCache) {
+  const firstTime = !S.primed;
+  for (const [uid, p] of Object.entries(S.players)) {
+    const now = completed(p.marks);
+    const prev = S.prevLines[uid] || new Set();
+    const fresh = now.filter(l => !prev.has(l.k));
+    S.prevLines[uid] = new Set(now.map(l => l.k));
+    if (!firstTime && fresh.length) celebrate(uid, p.nick, fresh[0]);
+  }
+  if (!fromCache) S.primed = true;
+}
+
+async function saveMine() {
+  if (!S.me || !S.route.id) return;
+  if (S.writing) { S.dirty = true; return; }
+  S.writing = true;
+  const boardId = S.route.id;
+  try {
+    do {
+      S.dirty = false;
+      const prev = S.players[S.me] || {};
+      const marks = [...S.myMarks].sort((a, b) => a - b);
+      const markedAt = Object.assign({}, prev.markedAt || {});
+      for (const k of Object.keys(markedAt)) if (!S.myMarks.has(+k)) delete markedAt[k];
+      for (const m of marks) if (!markedAt[m]) markedAt[m] = Date.now();
+      await F.setDoc(F.doc(fdb, "boards", boardId, "players", S.me), {
+        nick: S.myNick, marks, markedAt, joinedAt: prev.joinedAt || Date.now(), updatedAt: Date.now(),
+      });
+    } while (S.dirty);
+  } catch (e) {
+    console.error(e);
+    toast("Salvataggio non riuscito. Controlla la connessione.");
+    S.myMarks = new Set((S.players[S.me] || {}).marks || []);
+    render();
+  } finally { S.writing = false; }
+}
+
+function toggleCell(i) {
+  if (!S.me) return;
+  if (!S.myNick) { openJoin(() => toggleCell(i)); return; }
+  if (S.myMarks === null) S.myMarks = new Set((S.players[S.me] || {}).marks || []);
+  const had = S.myMarks.has(i);
+  if (had) S.myMarks.delete(i); else S.myMarks.add(i);
+  const p = Object.assign({ nick: S.myNick, markedAt: {} }, S.players[S.me] || {});
+  p.marks = [...S.myMarks];
+  p.markedAt = Object.assign({}, p.markedAt); if (!had) p.markedAt[i] = Date.now();
+  S.players = Object.assign({}, S.players, { [S.me]: p });
+  S.popCell = had ? -1 : i;
+  if (!had && navigator.vibrate) { try { navigator.vibrate(12); } catch {} }
+  detectBingos(false);
+  render();
+  saveMine();
+}
+function canEditBoard(b) { return !!(b && S.me && b.createdBy === S.me); }
+
+/* ---------- Views ---------- */
+function render() {
+  $app.replaceChildren();
+  if (!S.configured) { $app.append(viewNotConfigured()); return; }
+  if (!S.authReady) { $app.append(h("div", { class: "spinner" }, "Caricamento…")); return; }
+  if (!S.me) { $app.append(...viewAuth()); return; }
+  const r = S.route;
+  if (r.name === "home") $app.append(...viewHome());
+  else if (r.name === "edit") $app.append(...viewEdit());
+  else $app.append(...viewBoard());
+}
+
+function topbar(right) {
+  return h("div", { class: "topbar" },
+    h("button", { class: "brand", onclick: () => go("#"), "aria-label": "Tutti i tabelloni" }, "SUK BINGO"),
+    h("div", { class: "row" }, right || [],
+      h("button", { class: "avatar-btn", style: "background:" + colorOf(S.me), onclick: openAccount, "aria-label": "Account" }, initials(S.myNick || (S.user && S.user.displayName) || (S.user && S.user.email)))));
+}
+
+function viewNotConfigured() {
+  return h("div", { class: "hero" }, h("h1", null, "SUK BINGO"),
+    h("p", null, "L'app non è ancora collegata a Firebase. Inserisci la configurazione del progetto nel file config.js (vedi ISTRUZIONI.md)."));
+}
+
+function googleIcon() {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg"); svg.setAttribute("viewBox", "0 0 48 48"); svg.setAttribute("class", "gmark"); svg.setAttribute("aria-hidden", "true");
+  [["#FFC107","M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"],
+   ["#FF3D00","M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"],
+   ["#4CAF50","M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"],
+   ["#1976D2","M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"]].forEach(([c, d]) => {
+    const p = document.createElementNS(ns, "path"); p.setAttribute("fill", c); p.setAttribute("d", d); svg.append(p);
+  });
+  return svg;
+}
+
+function viewAuth() {
+  const invited = S.route.name === "board";
+  const isReg = S.authMode === "register";
+  const err = h("div", { class: "err", role: "alert" }, S.authErr || "");
+  const name = h("input", { class: "input", id: "au-name", autocomplete: "nickname", placeholder: "Il tuo nome", maxlength: "24" });
+  const email = h("input", { class: "input", id: "au-email", type: "email", autocomplete: "email", placeholder: "Email" });
+  const pass = h("input", { class: "input", id: "au-pass", type: "password", autocomplete: isReg ? "new-password" : "current-password", placeholder: "Password (minimo 6 caratteri)" });
+  const busy = on => $app.querySelectorAll("button").forEach(b => b.disabled = on);
+
+  async function google() {
+    S.authErr = ""; err.textContent = ""; busy(true);
+    const provider = new F.GoogleAuthProvider();
+    try { await F.signInWithPopup(auth, provider); }
+    catch (e) {
+      if ((e.code || "").includes("popup-blocked")) { try { await F.signInWithRedirect(auth, provider); return; } catch (e2) { e = e2; } }
+      err.textContent = authErrMsg(e); busy(false);
+    }
+  }
+  async function submit(ev) {
+    ev.preventDefault(); err.textContent = "";
+    const em = email.value.trim(), pw = pass.value;
+    if (isReg && !name.value.trim()) { err.textContent = "Scrivi il nome che vedranno gli altri."; name.focus(); return; }
+    if (!em || !pw) { err.textContent = "Inserisci email e password."; return; }
+    busy(true);
+    try {
+      if (isReg) {
+        const cred = await F.createUserWithEmailAndPassword(auth, em, pw);
+        const nick = name.value.trim();
+        await F.updateProfile(cred.user, { displayName: nick });
+        S.myNick = nick; lsSet("sukbingo.nick", nick); render();
+      } else {
+        await F.signInWithEmailAndPassword(auth, em, pw);
+      }
+    } catch (e) { err.textContent = authErrMsg(e); busy(false); }
+  }
+  async function reset() {
+    const em = email.value.trim();
+    if (!em) { err.textContent = "Scrivi la tua email qui sopra, poi tocca di nuovo “Password dimenticata”."; email.focus(); return; }
+    try { await F.sendPasswordResetEmail(auth, em); toast("Ti ho mandato un'email per reimpostare la password."); }
+    catch (e) { err.textContent = authErrMsg(e); }
+  }
+
+  return [
+    h("div", { class: "masthead", "aria-hidden": "true" }, [..."BINGO"].map(c => h("span", null, c))),
+    h("div", { class: "auth" },
+      h("p", { class: "hint", style: "font-size:15px;color:var(--ink)" }, invited ? "Sei stato invitato a una partita. Accedi per entrare nel tabellone." : "Accedi per creare un tabellone e giocare con gli amici."),
+      h("div", { class: "card" },
+        h("button", { class: "btn wide", onclick: google }, googleIcon(), "Continua con Google"),
+        h("div", { class: "or" }, "oppure con email"),
+        h("form", { onsubmit: submit, style: "display:flex;flex-direction:column;gap:10px", novalidate: true },
+          isReg ? name : null, email, pass,
+          h("button", { class: "btn primary wide", type: "submit" }, isReg ? "Crea account" : "Accedi")),
+        err,
+        h("div", { class: "row", style: "justify-content:space-between" },
+          h("button", { class: "linkbtn", onclick: () => { S.authMode = isReg ? "login" : "register"; S.authErr = ""; render(); } }, isReg ? "Ho già un account" : "Crea un account"),
+          !isReg ? h("button", { class: "linkbtn", onclick: reset }, "Password dimenticata") : null)))
+  ];
+}
+
+function viewHome() {
+  const out = [topbar(h("button", { class: "btn primary", onclick: () => go("#new") }, "+ Nuovo"))];
+  out.push(h("div", { class: "hero" },
+    h("h1", null, "Bingo", h("br"), "degli eventi"),
+    h("p", null, "Crea un tabellone 5×5 con gli eventi che volete, manda il link agli amici e segnate le caselle mentre succedono. Cinquina in riga, colonna o diagonale fa BINGO.")));
+  out.push(h("h3", { class: "section-h" }, "I tuoi tabelloni"));
+  if (!S.boardsLoaded) out.push(h("div", { class: "spinner" }, "Caricamento tabelloni…"));
+  else if (!S.boards.length) {
+    out.push(h("div", { class: "empty" },
+      h("div", null, "Qui compaiono i tabelloni che crei e quelli a cui ti invitano. Crea il primo, oppure parti dagli eventi d'esempio del SUK."),
+      h("div", { class: "row", style: "justify-content:center" },
+        h("button", { class: "btn primary", onclick: () => go("#new") }, "Crea tabellone"),
+        h("button", { class: "btn", onclick: () => { S.prefill = { title: SAMPLE_TITLE, cells: SAMPLE.slice() }; go("#new"); } }, "Usa l'esempio"))));
+  } else {
+    out.push(h("div", { class: "blist" }, S.boards.map(b => {
+      const mini = h("div", { class: "mini", "aria-hidden": "true" }, Array.from({ length: 25 }, (_, i) => h("i", { class: i === 12 ? "c" : "" })));
+      const n = (b.members || []).length;
+      return h("button", { class: "bitem", onclick: () => go("#b-" + b.id) }, mini,
+        h("div", { class: "meta" }, h("b", null, b.title || "Senza titolo"),
+          h("span", null, (b.createdBy === S.me ? "Creato da te" : "Invitato") + " · " + n + (n === 1 ? " giocatore" : " giocatori"))),
+        h("span", { "aria-hidden": "true", style: "color:var(--muted);font-size:20px" }, "›"));
+    })));
+  }
+  return out;
+}
+
+function viewEdit() {
+  const editing = S.route.id;
+  if (editing && !S.boardLoaded) return [topbar(), h("div", { class: "spinner" }, "Caricamento…")];
+  if (editing && !canEditBoard(S.board)) return [topbar(), h("div", { class: "empty" }, "Solo chi ha creato il tabellone può modificarlo.")];
+  let title = "", cells = Array(25).fill("");
+  if (editing && S.board) { title = S.board.title || ""; cells = (S.board.cells || []).slice(0, 25); while (cells.length < 25) cells.push(""); }
+  if (!editing && S.prefill) { title = S.prefill.title; cells = S.prefill.cells.slice(0, 25); S.prefill = null; }
+
+  const titleIn = h("input", { class: "input", id: "ed-title", maxlength: "60", placeholder: "Es. Torneo di sabato", value: title });
+  const areas = cells.map((c, i) => { const ta = h("textarea", { id: "ed-c" + i, class: i === 12 ? "center" : "", maxlength: "70", "aria-label": "Casella " + (i + 1), placeholder: i === 12 ? "centro" : "" }); ta.value = c; return ta; });
+  const bulk = h("textarea", { class: "input", id: "ed-bulk", placeholder: "Un evento per riga (fino a 25)" });
+  const status = h("div", { class: "hint", role: "status" });
+
+  async function save(ev) {
+    const btn = ev.currentTarget;
+    const filled = areas.map(a => a.value.trim());
+    const t = titleIn.value.trim() || "Bingo";
+    const empties = filled.filter(s => !s).length;
+    if (empties) { status.textContent = "Mancano " + empties + " caselle da riempire."; areas[filled.findIndex(s => !s)].focus(); return; }
+    const id = editing || newId();
+    status.textContent = "Salvataggio…"; btn.disabled = true;
+    try {
+      if (editing) await F.updateDoc(F.doc(fdb, "boards", id), { title: t, cells: filled, updatedAt: Date.now() });
+      else await F.setDoc(F.doc(fdb, "boards", id), { title: t, cells: filled, createdBy: S.me, createdAt: Date.now(), members: [S.me] });
+      go("#b-" + id);
+      if (!editing) setTimeout(() => toast("Tabellone creato. Tocca “Invita” per mandare il link."), 300);
+    } catch (e) { console.error(e); status.textContent = "Salvataggio non riuscito. Riprova."; btn.disabled = false; }
+  }
+
+  return [
+    topbar(h("button", { class: "btn ghost", onclick: () => go(editing ? "#b-" + editing : "#") }, "Annulla")),
+    h("div", { class: "hero" }, h("h1", { style: "font-size:clamp(28px,8vw,40px)" }, editing ? "Modifica tabellone" : "Nuovo tabellone"),
+      h("p", null, "Scrivi 25 eventi. La casella centrale è quella speciale, evidenziata.")),
+    h("div", { class: "field" }, h("label", { for: "ed-title" }, "Nome"), titleIn),
+    h("div", { class: "field" }, h("label", null, "Caselle"), h("div", { class: "egrid" }, areas)),
+    h("div", { class: "row" },
+      h("button", { class: "btn", onclick: () => { const v = areas.map(a => a.value); const center = v[12]; const o = shuffle(v.filter((_, i) => i !== 12)); o.splice(12, 0, center); o.forEach((x, i) => areas[i].value = x); } }, "Mescola"),
+      !editing ? h("button", { class: "btn", onclick: () => { titleIn.value = titleIn.value || SAMPLE_TITLE; SAMPLE.forEach((v, i) => areas[i].value = v); } }, "Usa l'esempio") : null),
+    h("details", { class: "bulk" }, h("summary", null, "Incolla una lista di eventi"), bulk,
+      h("button", { class: "btn", onclick: () => {
+        const lines = bulk.value.split(/\n/).map(s => s.replace(/^[-*•\d.)\s]+/, "").trim()).filter(Boolean).slice(0, 25);
+        lines.forEach((v, i) => areas[i].value = v); status.textContent = lines.length + " eventi inseriti.";
+      } }, "Riempi le caselle")),
+    h("div", { class: "row", style: "justify-content:flex-end" }, h("button", { class: "btn primary", onclick: save }, editing ? "Salva modifiche" : "Crea e apri")),
+    status,
+  ];
+}
+
+function viewBoard() {
+  const b = S.board;
+  if (!S.boardLoaded) return [topbar(), h("div", { class: "spinner" }, S.slow ? "Il tabellone non risponde. Controlla la connessione." : "Caricamento tabellone…")];
+  if (!b) return [topbar(), h("div", { class: "empty" }, "Questo tabellone non esiste più, oppure il link è sbagliato.", h("button", { class: "btn", onclick: () => go("#") }, "I tuoi tabelloni"))];
+
+  const byCell = Array.from({ length: 25 }, () => []);
+  for (const [uid, p] of Object.entries(S.players)) for (const m of p.marks || []) if (byCell[m]) byCell[m].push(uid);
+  const mine = S.myMarks || new Set((S.players[S.me] || {}).marks || []);
+
+  const right = [
+    h("button", { class: "btn", onclick: () => share(b) }, "Invita"),
+    canEditBoard(b) ? h("button", { class: "btn ghost", onclick: () => go("#edit-" + b.id) }, "Modifica") : null,
+  ];
+  const grid = h("div", { class: "grid", role: "grid", "aria-label": "Tabellone" }, (b.cells || []).slice(0, 25).map((txt, i) => {
+    const others = byCell[i].filter(u => u !== S.me);
+    const isMine = mine.has(i);
+    const cls = ["cell", sizeClass(txt), i === 12 ? "center" : "", isMine ? "mine" : "", S.popCell === i ? "pop" : "", S.winCells.has(i) ? "win" : ""].join(" ");
+    const chips = h("div", { class: "chips", "aria-hidden": "true" },
+      others.slice(0, 3).map(u => h("span", { class: "chip", style: "background:" + colorOf(u) }, initials((S.players[u] || {}).nick))),
+      others.length > 3 ? h("span", { class: "chip more" }, "+" + (others.length - 3)) : null);
+    const label = txt + (isMine ? ", segnata da te" : "") + (others.length ? ", segnata da " + others.length + " altri" : "");
+    const cell = h("button", { class: cls, "aria-label": label, "aria-pressed": isMine ? "true" : "false" },
+      h("span", { class: "txt" }, txt), isMine ? checkSvg() : null, chips);
+    attachPress(cell, () => toggleCell(i), () => openCell(i));
+    return cell;
+  }));
+  S.popCell = -1;
+
+  const ids = Object.keys(S.players).sort((a, c) => (S.players[a].joinedAt || 0) - (S.players[c].joinedAt || 0));
+  const plist = h("div", { class: "plist" }, ids.length ? ids.map(uid => {
+    const p = S.players[uid]; const lines = completed(p.marks).length;
+    return h("span", { class: "pchip" },
+      h("span", { class: "chip", style: "background:" + colorOf(uid) }, initials(p.nick)),
+      (p.nick || "Giocatore") + (uid === S.me ? " (tu)" : ""),
+      h("span", { class: "n" }, (p.marks || []).length + "/25"),
+      lines ? h("span", { class: "b" }, lines > 1 ? "BINGO ×" + lines : "BINGO") : null);
+  }) : h("span", { class: "hint" }, "Nessuno ha ancora segnato una casella."));
+
+  const out = [topbar(right), h("div", { class: "masthead", "aria-hidden": "true" }, [..."BINGO"].map(c => h("span", null, c))), h("h2", { class: "title" }, b.title || "Bingo")];
+  out.push(grid,
+    h("div", { class: "hint" }, "Tocca una casella quando ti capita l'evento. Tieni premuto per vedere chi l'ha presa."),
+    h("div", { class: "players" }, h("h3", null, "Giocatori"), plist));
+  if (canEditBoard(b)) out.push(h("div", { class: "row", style: "justify-content:center" }, deleteControl(b)));
+  return out;
+}
+
+function checkSvg() {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg"); svg.setAttribute("viewBox", "0 0 100 100"); svg.setAttribute("class", "check"); svg.setAttribute("aria-hidden", "true");
+  const p = document.createElementNS(ns, "path"); p.setAttribute("d", "M12 46 C 22 58, 30 74, 36 92 C 50 56, 70 26, 94 8");
+  svg.append(p); return svg;
+}
+
+function deleteControl(b) {
+  const wrap = h("div", { class: "row" });
+  wrap.append(h("button", { class: "btn ghost danger", onclick: () => {
+    wrap.replaceChildren(h("span", { class: "hint" }, "Eliminare per tutti?"),
+      h("button", { class: "btn danger", onclick: async () => {
+        try { await F.deleteDoc(F.doc(fdb, "boards", b.id)); toast("Tabellone eliminato"); go("#"); } catch { toast("Non sono riuscito a eliminarlo."); }
+      } }, "Sì, elimina"),
+      h("button", { class: "btn ghost", onclick: () => render() }, "Annulla"));
+  } }, "Elimina tabellone"));
+  return wrap;
+}
+
+function attachPress(el, onTap, onLong) {
+  let timer = null, sx = 0, sy = 0, longFired = false;
+  const clear = () => { clearTimeout(timer); timer = null; };
+  el.addEventListener("pointerdown", e => {
+    if (e.button !== 0) return;
+    longFired = false; sx = e.clientX; sy = e.clientY;
+    timer = setTimeout(() => { longFired = true; timer = null; if (navigator.vibrate) { try { navigator.vibrate(20); } catch {} } onLong(); }, 450);
+  });
+  el.addEventListener("pointermove", e => { if (timer && Math.hypot(e.clientX - sx, e.clientY - sy) > 10) clear(); });
+  ["pointerup", "pointercancel", "pointerleave"].forEach(ev => el.addEventListener(ev, clear));
+  el.addEventListener("contextmenu", e => e.preventDefault());
+  el.addEventListener("click", e => { if (longFired) { longFired = false; e.preventDefault(); return; } onTap(); });
+  el.addEventListener("keydown", e => { if (e.key === "i" || (e.key === "Enter" && e.shiftKey)) { e.preventDefault(); onLong(); } });
+}
+
+function openSheet(build) {
+  closeSheet();
+  const sheet = h("div", { class: "sheet", role: "dialog", "aria-modal": "true" }, h("div", { class: "grab" }));
+  const scrim = h("div", { class: "scrim", id: "scrim", onclick: e => { if (e.target === scrim) closeSheet(); } }, sheet);
+  build(sheet);
+  document.body.append(scrim);
+  const f = sheet.querySelector("input, button.primary, button"); f && f.focus();
+}
+function closeSheet() { const s = document.getElementById("scrim"); if (s) s.remove(); }
+document.addEventListener("keydown", e => { if (e.key === "Escape") { closeSheet(); closeParty(); } });
+
+function openCell(i) {
+  const b = S.board; if (!b) return;
+  const who = Object.entries(S.players).filter(([, p]) => (p.marks || []).includes(i))
+    .map(([uid, p]) => ({ uid, nick: p.nick, at: (p.markedAt || {})[i] || 0 })).sort((a, c) => a.at - c.at);
+  const mineHas = (S.myMarks || new Set((S.players[S.me] || {}).marks || [])).has(i);
+  openSheet(sheet => {
+    sheet.append(
+      h("div", { class: "section-h" }, "Casella " + "BINGO"[i % 5] + (Math.floor(i / 5) + 1)),
+      h("h2", null, b.cells[i]),
+      who.length ? h("ul", { class: "who" }, who.map(w => h("li", null,
+        h("span", { class: "chip", style: "background:" + colorOf(w.uid) }, initials(w.nick)),
+        (w.nick || "Giocatore") + (w.uid === S.me ? " (tu)" : ""),
+        h("span", { class: "t" }, w.at ? "alle " + fmtTime(w.at) : ""))))
+        : h("p", { class: "hint", style: "text-align:left;margin:0" }, "Nessuno ha ancora preso questa casella."),
+      h("div", { class: "row", style: "justify-content:flex-end" },
+        h("button", { class: "btn ghost", onclick: closeSheet }, "Chiudi"),
+        h("button", { class: "btn primary", onclick: () => { closeSheet(); toggleCell(i); } }, mineHas ? "Togli il mio segno" : "Mi è capitato!")));
+  });
+}
+
+function openJoin(after) {
+  openSheet(sheet => {
+    const input = h("input", { class: "input", id: "nick", maxlength: "24", placeholder: "Il tuo nome", value: S.myNick || "" });
+    const ok = async () => {
+      const v = input.value.trim(); if (!v) { input.focus(); return; }
+      S.myNick = v; lsSet("sukbingo.nick", v);
+      try { if (S.user && S.user.displayName !== v) await F.updateProfile(S.user, { displayName: v }); } catch {}
+      closeSheet();
+      if (after) after();
+      else { render(); if (S.route.id && S.players[S.me]) { if (S.myMarks === null) S.myMarks = new Set(S.players[S.me].marks || []); saveMine(); } }
+    };
+    input.addEventListener("keydown", e => { if (e.key === "Enter") ok(); });
+    sheet.append(h("h2", null, "Come ti chiami?"),
+      h("p", { class: "hint", style: "text-align:left;margin:0" }, "Gli altri vedranno l'iniziale sulle caselle che segni."),
+      input,
+      h("div", { class: "row", style: "justify-content:flex-end" }, h("button", { class: "btn ghost", onclick: closeSheet }, "Annulla"), h("button", { class: "btn primary", onclick: ok }, "Salva")));
+  });
+}
+
+function openAccount() {
+  openSheet(sheet => {
+    sheet.append(h("h2", null, S.myNick || "Il tuo account"),
+      h("p", { class: "hint", style: "text-align:left;margin:0" }, (S.user && S.user.email) || ""),
+      h("div", { class: "row", style: "justify-content:flex-end" },
+        h("button", { class: "btn", onclick: () => openJoin() }, "Cambia nome"),
+        h("button", { class: "btn danger", onclick: async () => { closeSheet(); await F.signOut(auth); } }, "Esci")));
+  });
+}
+
+async function share(b) {
+  const link = boardLink(b.id);
+  const text = "Giochiamo a " + (b.title || "Bingo") + "! Entra qui: " + link;
+  const input = h("input", { class: "input", id: "share-link", readonly: true, value: link });
+  openSheet(sheet => {
+    sheet.append(h("h2", null, "Invita gli amici"),
+      h("p", { class: "hint", style: "text-align:left;margin:0" }, "Chi apre il link accede con Google o con la sua email ed entra direttamente in questo tabellone."),
+      input,
+      h("div", { class: "row", style: "justify-content:flex-end" },
+        h("button", { class: "btn ghost", onclick: closeSheet }, "Chiudi"),
+        navigator.share ? h("button", { class: "btn", onclick: async () => { try { await navigator.share({ title: b.title, text, url: link }); closeSheet(); } catch {} } }, "Condividi…") : null,
+        h("a", { class: "btn", href: "https://wa.me/?text=" + encodeURIComponent(text), target: "_blank", rel: "noopener" }, "WhatsApp"),
+        h("button", { class: "btn primary", onclick: async () => {
+          try { await navigator.clipboard.writeText(link); toast("Link copiato"); closeSheet(); }
+          catch { input.select(); toast("Seleziona e copia il link"); }
+        } }, "Copia link")));
+  });
+}
+
+let partyTimer = null, partyRaf = 0;
+function closeParty() { const p = document.getElementById("party"); if (p) p.remove(); clearTimeout(partyTimer); cancelAnimationFrame(partyRaf); }
+function celebrate(uid, nick, line) {
+  closeParty(); closeSheet();
+  S.winCells = new Set(line.cells);
+  setTimeout(() => { S.winCells = new Set(); render(); }, 4200);
+  const canvas = h("canvas");
+  const party = h("div", { class: "party", id: "party", role: "alert", onclick: closeParty }, canvas,
+    h("div", { class: "inner" },
+      h("div", { class: "letters" }, [..."BINGO"].map((c, i) => h("span", { style: "--i:" + i + ";--c:" + BALL_COLORS[i] }, c))),
+      h("div", { class: "who" }, uid === S.me ? "Hai fatto BINGO!" : (nick || "Qualcuno") + " ha fatto BINGO!"),
+      h("div", { class: "line" }, "Cinquina in " + line.label + " · tocca per chiudere")));
+  document.body.append(party);
+  if (navigator.vibrate) { try { navigator.vibrate([60, 40, 60, 40, 160]); } catch {} }
+  if (!(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches)) confetti(canvas);
+  partyTimer = setTimeout(closeParty, 6000);
+}
+function confetti(canvas) {
+  const ctx = canvas.getContext("2d"); const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const W = canvas.width = innerWidth * dpr, H = canvas.height = innerHeight * dpr;
+  const parts = Array.from({ length: 160 }, () => ({
+    x: W / 2 + (Math.random() - .5) * W * .3, y: H * .45, vx: (Math.random() - .5) * 22 * dpr, vy: (-Math.random() * 20 - 6) * dpr,
+    s: (5 + Math.random() * 7) * dpr, r: Math.random() * 6, vr: (Math.random() - .5) * .4, c: BALL_COLORS[Math.floor(Math.random() * 5)], round: Math.random() < .3,
+  }));
+  const t0 = performance.now();
+  const step = t => {
+    ctx.clearRect(0, 0, W, H);
+    for (const p of parts) {
+      p.vy += .55 * dpr; p.vx *= .99; p.x += p.vx; p.y += p.vy; p.r += p.vr;
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.r); ctx.fillStyle = p.c;
+      if (p.round) { ctx.beginPath(); ctx.arc(0, 0, p.s / 2, 0, 7); ctx.fill(); } else ctx.fillRect(-p.s / 2, -p.s / 4, p.s, p.s / 2);
+      ctx.restore();
+    }
+    if (t - t0 < 5000 && document.getElementById("party")) partyRaf = requestAnimationFrame(step);
+  };
+  partyRaf = requestAnimationFrame(step);
+}
+
+/* ---------- Boot ---------- */
+(async function boot() {
+  S.route = parseHash();
+  if (!firebaseConfig.apiKey || !firebaseConfig.projectId) { S.configured = false; render(); return; }
+  render();
+  const [app, a, f] = await Promise.all([import(FB + "firebase-app.js"), import(FB + "firebase-auth.js"), import(FB + "firebase-firestore.js")]);
+  F = { ...a, ...f };
+  const fbApp = app.initializeApp(firebaseConfig);
+  auth = a.getAuth(fbApp);
+  try { await a.setPersistence(auth, a.browserLocalPersistence); } catch {}
+  try { fdb = f.initializeFirestore(fbApp, { localCache: f.persistentLocalCache() }); } catch { fdb = f.getFirestore(fbApp); }
+  a.getRedirectResult(auth).catch(e => { S.authErr = authErrMsg(e); render(); });
+  a.onAuthStateChanged(auth, u => {
+    S.authReady = true;
+    const prev = S.me;
+    S.user = u; S.me = u ? u.uid : null;
+    if (u) S.myNick = u.displayName || lsGet("sukbingo.nick") || S.myNick || "";
+    if (S.me !== prev) {
+      stopSubs(); if (S.boardsUnsub) { S.boardsUnsub(); S.boardsUnsub = null; }
+      S.board = null; S.boardLoaded = false; S.players = {}; S.myMarks = null; S.primed = false; S.prevLines = {}; S.joinedChecked = false;
+      if (S.me) { subscribeBoards(); if (S.route.id) subscribeBoard(S.route.id); }
+    }
+    render();
+  });
+})();
+
+if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
