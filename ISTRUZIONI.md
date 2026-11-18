@@ -39,3 +39,10 @@ Il sito sarà su `https://<nome-progetto>.web.app`.
 - Solo chi ha fatto l'accesso **e** ha il link può aprire un tabellone.
 - Nella home ognuno vede solo i tabelloni creati da lui o a cui è entrato.
 - Ognuno può segnare o togliere solo le proprie caselle. Solo il creatore può modificare o eliminare il tabellone.
+
+## Creare il tabellone insieme
+- **+ Nuovo → Creiamolo insieme**: scegli una scadenza e invita gli amici con il link.
+- Ognuno scrive le proposte come messaggi in una chat; gli altri reagiscono con 👍 o 👎 (un voto per proposta a persona; non si votano le proprie).
+- Alla scadenza (o quando il creatore preme *Chiudi ora*) entrano le proposte con il saldo 👍−👎 più alto; poi, a caso, quelle a zero; per ultime quelle con saldo negativo. Se le proposte sono meno di 25, alcune vengono ripetute a caso. Le caselle vengono mescolate.
+- Tutti i partecipanti ricevono in automatico il tabellone, che resta condivisibile con altri.
+- Dopo questo aggiornamento le regole di Firestore vanno ripubblicate (Firestore → Rules) con il contenuto di `firestore.rules`.

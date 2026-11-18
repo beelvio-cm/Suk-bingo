@@ -34,7 +34,7 @@ function h(tag, attrs, ...kids) {
     else if (k === "style") el.setAttribute("style", v);
     else el.setAttribute(k, v === true ? "" : v);
   }
-  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid.nodeType ? kid : String(kid));
+  for (const kid of kids.flat(Infinity)) if (kid != null && kid !== false) el.append(kid.nodeType ? kid : String(kid));
   return el;
 }
 const lsGet = k => { try { return localStorage.getItem(k); } catch { return null; } };
@@ -72,6 +72,9 @@ function parseHash() {
   const e = /^#edit-([a-z0-9]{4,20})$/.exec(location.hash || "");
   if (e) return { name: "edit", id: e[1] };
   if (location.hash === "#new") return { name: "edit", id: null };
+  const dm = /^#d-([a-z0-9]{4,20})$/.exec(location.hash || "");
+  if (dm) return { name: "draft", id: dm[1] };
+  if (location.hash === "#newd") return { name: "newdraft", id: null };
   return { name: "home" };
 }
 function go(hash) { if (location.hash === hash || (!location.hash && hash === "#")) onRoute(); else location.hash = hash; }
@@ -80,13 +83,14 @@ function stopSubs() { S.unsubs.forEach(u => { try { u(); } catch {} }); S.unsubs
 
 function onRoute() {
   const r = parseHash();
-  const sameBoard = S.route.id && r.id === S.route.id;
+  const kind = x => x.name === "draft" ? "d" : "b";
+  const sameBoard = S.route.id && r.id === S.route.id && kind(r) === kind(S.route);
   S.route = r;
   if (!sameBoard) {
-    stopSubs();
+    stopSubs(); stopDraftSubs();
     S.board = null; S.boardLoaded = false; S.players = {}; S.playersLoaded = false;
     S.prevLines = {}; S.primed = false; S.myMarks = null; S.winCells = new Set(); S.joinedChecked = false;
-    if (r.id && S.me) subscribeBoard(r.id);
+    if (r.id && S.me) (r.name === "draft" ? subscribeDraft : subscribeBoard)(r.id);
   }
   closeParty(); closeSheet();
   window.scrollTo(0, 0);
@@ -197,6 +201,8 @@ function render() {
   const r = S.route;
   if (r.name === "home") $app.append(...viewHome());
   else if (r.name === "edit") $app.append(...viewEdit());
+  else if (r.name === "draft") $app.append(...viewDraft());
+  else if (r.name === "newdraft") $app.append(...viewNewDraft());
   else $app.append(...viewBoard());
 }
 
@@ -290,17 +296,25 @@ function viewAuth() {
 }
 
 function viewHome() {
-  const out = [topbar(h("button", { class: "btn primary", onclick: () => go("#new") }, "+ Nuovo"))];
+  const out = [topbar(h("button", { class: "btn primary", onclick: openNewChoice }, "+ Nuovo"))];
   out.push(h("div", { class: "hero" },
     h("h1", null, "Bingo", h("br"), "degli eventi"),
     h("p", null, "Crea un tabellone 5×5 con gli eventi che volete, manda il link agli amici e segnate le caselle mentre succedono. Cinquina in riga, colonna o diagonale fa BINGO.")));
+  if ((S.drafts || []).length) {
+    out.push(h("h3", { class: "section-h" }, "In preparazione"));
+    out.push(h("div", { class: "blist" }, S.drafts.map(d => h("button", { class: "bitem", onclick: () => go("#d-" + d.id) },
+      h("span", { class: "dbadge", "aria-hidden": "true" }, "✎"),
+      h("div", { class: "meta" }, h("b", null, d.title || "Bingo"),
+        h("span", null, Date.now() >= d.deadline ? "Scaduta: il tabellone sta per arrivare" : "Proposte e voti ancora per " + shortLeft(d.deadline))),
+      h("span", { "aria-hidden": "true", style: "color:var(--muted);font-size:20px" }, "›")))));
+  }
   out.push(h("h3", { class: "section-h" }, "I tuoi tabelloni"));
   if (!S.boardsLoaded) out.push(h("div", { class: "spinner" }, "Caricamento tabelloni…"));
   else if (!S.boards.length) {
     out.push(h("div", { class: "empty" },
       h("div", null, "Qui compaiono i tabelloni che crei e quelli a cui ti invitano. Crea il primo e manda il link agli amici."),
       h("div", { class: "row", style: "justify-content:center" },
-        h("button", { class: "btn primary", onclick: () => go("#new") }, "Crea tabellone"))));
+        h("button", { class: "btn primary", onclick: openNewChoice }, "Crea tabellone"))));
   } else {
     out.push(h("div", { class: "blist" }, S.boards.map(b => {
       const mini = h("div", { class: "mini", "aria-hidden": "true" }, Array.from({ length: 25 }, (_, i) => h("i", { class: i === 12 ? "c" : "" })));
@@ -557,6 +571,361 @@ function confetti(canvas) {
   partyRaf = requestAnimationFrame(step);
 }
 
+/* ---------- Creazione condivisa (proposte + voti) ---------- */
+const D = { draft: null, loaded: false, entries: [], people: {}, finalizing: false, tick: null, unsubs: [] };
+
+function stopDraftSubs() { D.unsubs.forEach(u => { try { u(); } catch {} }); D.unsubs = []; clearInterval(D.tick); D.tick = null; }
+function draftLink(id) { return location.origin + location.pathname + "#d-" + id; }
+
+function subscribeDrafts() {
+  if (S.draftsUnsub) S.draftsUnsub();
+  const q = F.query(F.collection(fdb, "drafts"), F.where("members", "array-contains", S.me));
+  S.draftsUnsub = F.onSnapshot(q, snap => {
+    S.drafts = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(d => d.status === "open").sort((a, b) => (a.deadline || 0) - (b.deadline || 0));
+    // Chi apre l'app dopo la scadenza chiude le creazioni scadute.
+    S.drafts.filter(d => Date.now() >= d.deadline).forEach(d => finalizeDraft(d.id));
+    if (S.route.name === "home") render();
+  }, err => { console.error(err); S.drafts = []; });
+}
+
+function subscribeDraft(id) {
+  D.draft = null; D.loaded = false; D.entries = []; D.people = {}; D.joined = false; D.tab = "chat"; D.scrollDown = true;
+  const t = setTimeout(() => { S.slow = true; render(); }, 10000);
+  const ref = F.doc(fdb, "drafts", id);
+  D.unsubs.push(F.onSnapshot(ref, d => {
+    clearTimeout(t); S.slow = false;
+    D.draft = d.exists() ? { id, ...d.data() } : null;
+    D.loaded = true;
+    const dr = D.draft;
+    if (dr && dr.status === "closed" && dr.boardId) { go("#b-" + dr.boardId); return; }
+    if (dr && !d.metadata.fromCache && !D.joined) {
+      D.joined = true;
+      if (!(dr.members || []).includes(S.me)) F.updateDoc(ref, { members: F.arrayUnion(S.me) }).catch(e => console.warn("join", e));
+      if (!D.people[S.me] && S.myNick) savePerson(id, null);
+    }
+    renderDraftKeepFocus();
+  }, err => { console.error(err); clearTimeout(t); D.loaded = true; D.draft = null; render(); }));
+  D.unsubs.push(F.onSnapshot(F.collection(fdb, "drafts", id, "entries"), snap => {
+    D.entries = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    renderDraftKeepFocus();
+  }, err => console.error(err)));
+  D.unsubs.push(F.onSnapshot(F.collection(fdb, "drafts", id, "people"), snap => {
+    const p = {}; snap.docs.forEach(d => { p[d.id] = d.data(); }); D.people = p;
+    renderDraftKeepFocus();
+  }, err => console.error(err)));
+  D.tick = setInterval(() => {
+    const el = document.getElementById("countdown");
+    if (!D.draft || !el) return;
+    el.textContent = countdownText(D.draft.deadline);
+    if (Date.now() >= D.draft.deadline && D.draft.status === "open" && !D.finalizing) finalizeDraft(D.draft.id);
+  }, 1000);
+}
+
+// Ridisegna senza perdere quello che si sta scrivendo nel campo proposta.
+function renderDraftKeepFocus() {
+  if (S.route.name !== "draft") return;
+  const inp = document.getElementById("entry-in");
+  const val = inp ? inp.value : "", focused = inp && document.activeElement === inp;
+  const y = window.scrollY;
+  render();
+  const n = document.getElementById("entry-in");
+  if (n) { n.value = val; if (focused) n.focus({ preventScroll: true }); }
+  if (D.scrollDown) { D.scrollDown = false; const c = document.querySelector(".compose"); if (c) c.scrollIntoView({ block: "end" }); }
+  else window.scrollTo(0, y);
+}
+
+// Punteggio = pollici su meno pollici giù.
+function tally(peopleList) {
+  const up = {}, down = {};
+  for (const p of peopleList) {
+    for (const e of p.up || []) up[e] = (up[e] || 0) + 1;
+    for (const e of p.down || []) down[e] = (down[e] || 0) + 1;
+  }
+  return { up, down, score: id => (up[id] || 0) - (down[id] || 0) };
+}
+function countdownText(deadline) {
+  let s = Math.max(0, Math.floor((deadline - Date.now()) / 1000));
+  if (!s) return "Tempo scaduto";
+  const d = Math.floor(s / 86400); s %= 86400;
+  const hh = String(Math.floor(s / 3600)).padStart(2, "0"), mm = String(Math.floor(s % 3600 / 60)).padStart(2, "0"), ss = String(s % 60).padStart(2, "0");
+  return (d ? d + (d === 1 ? " giorno " : " giorni ") : "") + hh + ":" + mm + ":" + ss;
+}
+function shortLeft(deadline) {
+  const m = Math.max(0, Math.round((deadline - Date.now()) / 60000));
+  if (m < 60) return m + " min";
+  if (m < 48 * 60) return Math.round(m / 60) + " ore";
+  return Math.round(m / 1440) + " giorni";
+}
+function fmtDeadline(ts) { return new Date(ts).toLocaleString("it-IT", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }); }
+function toLocalInput(ts) { const d = new Date(ts); const p = n => String(n).padStart(2, "0"); return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + "T" + p(d.getHours()) + ":" + p(d.getMinutes()); }
+
+async function savePerson(draftId, votes) {
+  const prev = D.people[S.me] || {};
+  const data = { nick: S.myNick || "Giocatore", up: votes ? votes.up : (prev.up || []), down: votes ? votes.down : (prev.down || []), joinedAt: prev.joinedAt || Date.now() };
+  D.people = Object.assign({}, D.people, { [S.me]: data });
+  try { await F.setDoc(F.doc(fdb, "drafts", draftId, "people", S.me), data); }
+  catch (e) { console.error(e); toast("Non sono riuscito a salvare. Controlla la connessione."); }
+}
+
+function toggleVote(entry, dir) {
+  if (!S.myNick) { openJoin(() => toggleVote(entry, dir)); return; }
+  if (entry.author === S.me) { toast("Non puoi votare le tue proposte."); return; }
+  const me = D.people[S.me] || {};
+  const up = new Set(me.up || []), down = new Set(me.down || []);
+  const mine = dir > 0 ? up : down, other = dir > 0 ? down : up;
+  if (mine.has(entry.id)) mine.delete(entry.id); else { mine.add(entry.id); other.delete(entry.id); }
+  savePerson(D.draft.id, { up: [...up], down: [...down] });
+  renderDraftKeepFocus();
+}
+
+async function addEntry(text) {
+  const t = text.trim().replace(/\s+/g, " ").slice(0, 70);
+  if (!t) return false;
+  if (!S.myNick) { openJoin(() => addEntry(text)); return false; }
+  if (D.entries.some(e => e.text.toLowerCase() === t.toLowerCase())) { toast("Questa proposta c'è già: votala!"); return false; }
+  try {
+    await F.setDoc(F.doc(fdb, "drafts", D.draft.id, "entries", newId()), { text: t, author: S.me, authorNick: S.myNick, createdAt: Date.now() });
+    if (!D.people[S.me]) savePerson(D.draft.id, null);
+    return true;
+  } catch (e) { console.error(e); toast("Proposta non salvata. La creazione potrebbe essere già chiusa."); return false; }
+}
+
+// Ordine di priorità: punteggio positivo (dal più alto), poi a caso quelle a zero o senza voti,
+// poi le negative (dalla meno negativa). Se le proposte sono meno di 25, se ne ripetono alcune a caso.
+function rankEntries(entries, score) {
+  return [
+    ...shuffle(entries.filter(e => score(e.id) > 0)).sort((a, b) => score(b.id) - score(a.id)),
+    ...shuffle(entries.filter(e => score(e.id) === 0)),
+    ...shuffle(entries.filter(e => score(e.id) < 0)).sort((a, b) => score(b.id) - score(a.id)),
+  ];
+}
+function pickCells(entries, score) {
+  const chosen = rankEntries(entries, score).slice(0, 25);
+  const base = chosen.slice();
+  while (chosen.length < 25) chosen.push(base[Math.floor(Math.random() * base.length)]);
+  return shuffle(chosen.map(e => e.text));
+}
+
+async function finalizeDraft(id) {
+  if (D.finalizing) return;
+  D.finalizing = true;
+  try {
+    const ref = F.doc(fdb, "drafts", id);
+    const [es, ps] = await Promise.all([F.getDocs(F.collection(fdb, "drafts", id, "entries")), F.getDocs(F.collection(fdb, "drafts", id, "people"))]);
+    const entries = es.docs.map(d => ({ id: d.id, ...d.data() }));
+    if (!entries.length) return; // niente da mettere nel tabellone: resta aperta
+    const cells = pickCells(entries, tally(ps.docs.map(d => d.data())).score);
+    await F.runTransaction(fdb, async tx => {
+      const snap = await tx.get(ref);
+      if (!snap.exists()) return;
+      const d = snap.data();
+      if (d.status !== "open") return;
+      if (Date.now() < d.deadline && d.createdBy !== S.me) return;
+      tx.set(F.doc(fdb, "boards", id), { title: d.title, cells, createdBy: d.createdBy, createdAt: Date.now(), members: d.members, fromDraft: id });
+      tx.update(ref, { status: "closed", boardId: id, closedAt: Date.now() });
+    });
+  } catch (e) {
+    console.warn("finalize", e);
+  } finally { D.finalizing = false; }
+}
+
+function viewNewDraft() {
+  const titleIn = h("input", { class: "input", id: "nd-title", maxlength: "60", placeholder: "Es. Bingo del torneo di sabato" });
+  const dl = h("input", { class: "input", id: "nd-deadline", type: "datetime-local", value: toLocalInput(Date.now() + 24 * 3600e3) });
+  const status = h("div", { class: "hint", role: "status" });
+  const quick = (label, ms) => h("button", { class: "btn", type: "button", onclick: () => { dl.value = toLocalInput(Date.now() + ms); } }, label);
+  async function create(ev) {
+    const btn = ev.currentTarget;
+    const deadline = new Date(dl.value).getTime();
+    if (!deadline || deadline < Date.now() + 60e3) { status.textContent = "Scegli una scadenza nel futuro."; dl.focus(); return; }
+    const id = newId(); btn.disabled = true; status.textContent = "Creazione…";
+    try {
+      await F.setDoc(F.doc(fdb, "drafts", id), { title: titleIn.value.trim() || "Bingo", createdBy: S.me, createdAt: Date.now(), deadline, members: [S.me], status: "open" });
+      go("#d-" + id);
+      setTimeout(() => openShareDraft({ id, title: titleIn.value.trim() || "Bingo" }), 400);
+    } catch (e) { console.error(e); status.textContent = "Creazione non riuscita. Riprova."; btn.disabled = false; }
+  }
+  return [
+    topbar(h("button", { class: "btn ghost", onclick: () => go("#") }, "Annulla")),
+    h("div", { class: "hero" }, h("h1", { style: "font-size:clamp(28px,8vw,40px)" }, "Creiamolo insieme"),
+      h("p", null, "Inviti gli amici, ognuno propone gli eventi che vuole e vota quelli degli altri. Alla scadenza le proposte più votate formano il tabellone, mescolate a caso.")),
+    h("div", { class: "field" }, h("label", { for: "nd-title" }, "Nome del tabellone"), titleIn),
+    h("div", { class: "field" }, h("label", { for: "nd-deadline" }, "Scadenza per proporre e votare"), dl,
+      h("div", { class: "row" }, quick("Tra 1 ora", 3600e3), quick("Tra 1 giorno", 86400e3), quick("Tra 3 giorni", 3 * 86400e3))),
+    h("div", { class: "row", style: "justify-content:flex-end" }, h("button", { class: "btn primary", onclick: create }, "Crea e invita")),
+    status,
+  ];
+}
+
+function viewDraft() {
+  const d = D.draft;
+  if (!D.loaded) return [topbar(), h("div", { class: "spinner" }, S.slow ? "Non riesco a raggiungere la creazione. Controlla la connessione." : "Caricamento…")];
+  if (!d) return [topbar(), h("div", { class: "empty" }, "Questa creazione non esiste più, oppure il link è sbagliato.", h("button", { class: "btn", onclick: () => go("#") }, "I tuoi tabelloni"))];
+  const isCreator = d.createdBy === S.me;
+  const T = tally(Object.values(D.people));
+  const myUp = new Set((D.people[S.me] || {}).up || []), myDown = new Set((D.people[S.me] || {}).down || []);
+  // Per la lista: stesso ordine della scelta finale, ma stabile (a parità, la proposta più vecchia prima).
+  const band = id => T.score(id) > 0 ? 0 : T.score(id) === 0 ? 1 : 2;
+  const sorted = D.entries.slice().sort((a, b) => band(a.id) - band(b.id) || (band(a.id) === 1 ? 0 : T.score(b.id) - T.score(a.id)) || (a.createdAt || 0) - (b.createdAt || 0));
+  const expired = Date.now() >= d.deadline;
+
+  const input = h("input", { class: "input", id: "entry-in", maxlength: "70", placeholder: "Proponi un evento…", enterkeyhint: "send", autocomplete: "off" });
+  const submit = async () => { const v = input.value; if (await addEntry(v)) { input.value = ""; input.focus(); D.scrollDown = true; } };
+  input.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
+  const tab = D.tab || "chat";
+
+  const reactBtns = (e, mine) => {
+    const isUp = myUp.has(e.id), isDown = myDown.has(e.id);
+    return h("div", { class: "votes" },
+      h("button", { class: "vote up" + (isUp ? " on" : ""), disabled: mine, "aria-pressed": isUp ? "true" : "false", "aria-label": "Pollice su, " + (T.up[e.id] || 0), onclick: ev => { ev.stopPropagation(); toggleVote(e, 1); } },
+        h("span", { "aria-hidden": "true" }, "👍"), h("b", null, String(T.up[e.id] || 0))),
+      h("button", { class: "vote down" + (isDown ? " on" : ""), disabled: mine, "aria-pressed": isDown ? "true" : "false", "aria-label": "Pollice giù, " + (T.down[e.id] || 0), onclick: ev => { ev.stopPropagation(); toggleVote(e, -1); } },
+        h("span", { "aria-hidden": "true" }, "👎"), h("b", null, String(T.down[e.id] || 0))));
+  };
+  const delBtn = e => (e.author === S.me || isCreator) ? h("button", { class: "iconbtn", "aria-label": "Elimina proposta", onclick: async ev => {
+    ev.stopPropagation();
+    try { await F.deleteDoc(F.doc(fdb, "drafts", d.id, "entries", e.id)); } catch { toast("Non sono riuscito a eliminarla."); }
+  } }, "×") : null;
+
+  const votedCount = sorted.filter(e => T.score(e.id) > 0).length;
+  const rankPos = {}; sorted.forEach((e, i) => { rankPos[e.id] = i; });
+
+  // Vista chat: le proposte come messaggi, in ordine di arrivo.
+  const chrono = D.entries.slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  let lastAuthor = null, lastDay = "";
+  const chat = h("div", { class: "chat", id: "chat" }, chrono.length ? chrono.flatMap(e => {
+    const mine = e.author === S.me, sc = T.score(e.id);
+    const day = new Date(e.createdAt || 0).toLocaleDateString("it-IT", { weekday: "long", day: "numeric", month: "long" });
+    const out = [];
+    if (day !== lastDay) { out.push(h("div", { class: "daysep" }, day)); lastDay = day; lastAuthor = null; }
+    const first = e.author !== lastAuthor; lastAuthor = e.author;
+    const bubble = h("div", { class: "bubble" + (mine ? " me" : "") + (rankPos[e.id] < 25 && sc > 0 ? " in" : "") + (sc < 0 ? " neg" : "") },
+      (!mine && first) ? h("div", { class: "who-n", style: "color:" + colorOf(e.author) }, e.authorNick || "Giocatore") : null,
+      h("div", { class: "btext" }, e.text),
+      h("div", { class: "bmeta" }, reactBtns(e, mine), h("span", { class: "spacer" }), delBtn(e), h("time", null, fmtTime(e.createdAt))));
+    attachPress(bubble, () => {}, () => openVoters(e));
+    out.push(h("div", { class: "msg" + (mine ? " me" : "") + (first ? " first" : "") },
+      !mine ? (first ? h("span", { class: "chip", style: "background:" + colorOf(e.author), "aria-hidden": "true" }, initials(e.authorNick)) : h("span", { class: "chip ghost" })) : null,
+      bubble));
+    return out;
+  }) : h("div", { class: "empty" }, "Ancora nessuna proposta. Scrivi la prima qui sotto: gli altri potranno reagire con 👍 o 👎."));
+
+  // Vista classifica: stesso ordine usato alla chiusura.
+  const list = h("div", { class: "elist" }, sorted.length ? sorted.map((e, idx) => {
+    const sc = T.score(e.id), mine = e.author === S.me;
+    const row = h("div", { class: "entry" + (idx < 25 && sc > 0 ? " in" : "") + (sc < 0 ? " neg" : "") },
+      h("span", { class: "rank" }, String(idx + 1)),
+      h("div", { class: "etext" }, h("span", null, e.text), h("small", null, (mine ? "tua proposta" : "di " + (e.authorNick || "Giocatore")) + " · saldo " + (sc > 0 ? "+" : "") + sc)),
+      reactBtns(e, mine));
+    attachPress(row, () => {}, () => openVoters(e));
+    const out = [row];
+    if (idx === 24 && sorted.length > 25) out.push(h("div", { class: "cut" }, "Fin qui entrano nel tabellone"));
+    return out;
+  }) : h("div", { class: "empty" }, "Ancora nessuna proposta."));
+
+  const ppl = Object.entries(D.people).sort((a, b) => (a[1].joinedAt || 0) - (b[1].joinedAt || 0));
+  let summary;
+  if (!sorted.length) summary = "Servono 25 caselle.";
+  else if (votedCount >= 25) summary = sorted.length + " proposte: entrano le 25 con il saldo più alto (👍 meno 👎).";
+  else if (sorted.length >= 25) summary = sorted.length + " proposte, " + votedCount + " con saldo positivo: le altre caselle verranno scelte a caso tra quelle senza voti, e solo alla fine tra quelle bocciate.";
+  else summary = sorted.length + " proposte su 25 caselle: se non ne arrivano altre, alcune verranno ripetute a caso.";
+
+  const out = [
+    topbar([h("button", { class: "btn", onclick: () => openShareDraft(d) }, "Invita")]),
+    h("div", { class: "hero" },
+      h("div", { class: "section-h" }, "Tabellone in preparazione"),
+      h("h1", { style: "font-size:clamp(28px,8vw,42px)" }, d.title || "Bingo")),
+    h("div", { class: "countbox" },
+      h("div", null, h("div", { class: "section-h" }, expired ? "Scadenza passata" : "Si chiude tra"), h("div", { class: "count", id: "countdown" }, countdownText(d.deadline))),
+      h("div", { class: "hint", style: "text-align:right" }, fmtDeadline(d.deadline))),
+  ];
+  if (expired && !sorted.length) out.push(h("div", { class: "banner warn" }, "Tempo scaduto senza proposte. " + (isCreator ? "Allunga la scadenza qui sotto." : "Il creatore può allungare la scadenza.")));
+  out.push(
+    h("div", { class: "tabs", role: "tablist" },
+      h("button", { class: "tab" + (tab === "chat" ? " on" : ""), role: "tab", "aria-selected": tab === "chat" ? "true" : "false", onclick: () => { D.tab = "chat"; D.scrollDown = true; render(); } }, "Proposte (" + sorted.length + ")"),
+      h("button", { class: "tab" + (tab === "rank" ? " on" : ""), role: "tab", "aria-selected": tab === "rank" ? "true" : "false", onclick: () => { D.tab = "rank"; render(); } }, "Classifica")),
+    h("div", { class: "hint", style: "text-align:left" }, summary + " Tieni premuto su una proposta per vedere chi l'ha votata."));
+  if (tab === "chat") out.push(chat, h("div", { class: "compose" }, input, h("button", { class: "btn primary", onclick: submit, "aria-label": "Invia proposta" }, "Invia")));
+  else out.push(list);
+  out.push(
+    h("div", { class: "players" }, h("h3", null, "Partecipanti"), h("div", { class: "plist" }, ppl.length ? ppl.map(([uid, p]) =>
+      h("span", { class: "pchip" }, h("span", { class: "chip", style: "background:" + colorOf(uid) }, initials(p.nick)), (p.nick || "Giocatore") + (uid === S.me ? " (tu)" : ""),
+        h("span", { class: "n" }, D.entries.filter(e => e.author === uid).length + " prop."))) : h("span", { class: "hint" }, "Ancora nessuno."))));
+  if (isCreator) out.push(creatorControls(d, sorted.length));
+  return out;
+}
+
+function openVoters(e) {
+  const ups = [], downs = [];
+  for (const [uid, p] of Object.entries(D.people)) {
+    if ((p.up || []).includes(e.id)) ups.push([uid, p.nick]);
+    if ((p.down || []).includes(e.id)) downs.push([uid, p.nick]);
+  }
+  const li = ([uid, nick]) => h("li", null, h("span", { class: "chip", style: "background:" + colorOf(uid) }, initials(nick)), (nick || "Giocatore") + (uid === S.me ? " (tu)" : ""));
+  openSheet(sheet => {
+    sheet.append(h("div", { class: "section-h" }, "Proposta di " + (e.author === S.me ? "te" : (e.authorNick || "Giocatore"))), h("h2", null, e.text),
+      h("div", { class: "section-h" }, "👍 " + ups.length), ups.length ? h("ul", { class: "who" }, ups.map(li)) : h("p", { class: "hint", style: "text-align:left;margin:0" }, "Nessuno."),
+      h("div", { class: "section-h" }, "👎 " + downs.length), downs.length ? h("ul", { class: "who" }, downs.map(li)) : h("p", { class: "hint", style: "text-align:left;margin:0" }, "Nessuno."),
+      h("div", { class: "row", style: "justify-content:flex-end" }, h("button", { class: "btn ghost", onclick: closeSheet }, "Chiudi")));
+  });
+}
+
+function creatorControls(d, nEntries) {
+  const dl = h("input", { class: "input", id: "dr-deadline", type: "datetime-local", value: toLocalInput(Math.max(d.deadline, Date.now() + 3600e3)) });
+  const wrap = h("div", { class: "card creator" },
+    h("h3", { class: "section-h" }, "Solo per te che l'hai creato"),
+    h("div", { class: "field" }, h("label", { for: "dr-deadline" }, "Cambia scadenza"),
+      h("div", { class: "addrow" }, dl, h("button", { class: "btn", onclick: async () => {
+        const t = new Date(dl.value).getTime();
+        if (!t || t < Date.now() + 60e3) { toast("Scegli una scadenza nel futuro."); return; }
+        try { await F.updateDoc(F.doc(fdb, "drafts", d.id), { deadline: t }); toast("Scadenza aggiornata"); } catch { toast("Non sono riuscito a cambiarla."); }
+      } }, "Salva"))),
+    h("div", { class: "row" },
+      h("button", { class: "btn primary", disabled: !nEntries, onclick: async ev => {
+        ev.currentTarget.disabled = true; toast("Creo il tabellone…"); await finalizeDraft(d.id);
+      } }, "Chiudi ora e crea il tabellone"),
+      deleteDraftControl(d)));
+  return wrap;
+}
+function deleteDraftControl(d) {
+  const wrap = h("div", { class: "row" });
+  wrap.append(h("button", { class: "btn ghost danger", onclick: () => {
+    wrap.replaceChildren(h("span", { class: "hint" }, "Eliminare per tutti?"),
+      h("button", { class: "btn danger", onclick: async () => { try { await F.deleteDoc(F.doc(fdb, "drafts", d.id)); go("#"); } catch { toast("Non sono riuscito a eliminarla."); } } }, "Sì, elimina"),
+      h("button", { class: "btn ghost", onclick: () => render() }, "Annulla"));
+  } }, "Elimina"));
+  return wrap;
+}
+
+function openShareDraft(d) {
+  const link = draftLink(d.id);
+  const text = "Creiamo insieme il tabellone di " + (d.title || "Bingo") + "! Proponi e vota gli eventi qui: " + link;
+  const input = h("input", { class: "input", id: "share-link", readonly: true, value: link });
+  openSheet(sheet => {
+    sheet.append(h("h2", null, "Invita a creare il tabellone"),
+      h("p", { class: "hint", style: "text-align:left;margin:0" }, "Chi apre il link può proporre eventi e votare fino alla scadenza. Alla fine riceverà in automatico il tabellone."),
+      input,
+      h("div", { class: "row", style: "justify-content:flex-end" },
+        h("button", { class: "btn ghost", onclick: closeSheet }, "Chiudi"),
+        navigator.share ? h("button", { class: "btn", onclick: async () => { try { await navigator.share({ title: d.title, text, url: link }); closeSheet(); } catch {} } }, "Condividi…") : null,
+        h("a", { class: "btn", href: "https://wa.me/?text=" + encodeURIComponent(text), target: "_blank", rel: "noopener" }, "WhatsApp"),
+        h("button", { class: "btn primary", onclick: async () => {
+          try { await navigator.clipboard.writeText(link); toast("Link copiato"); closeSheet(); }
+          catch { input.select(); toast("Seleziona e copia il link"); }
+        } }, "Copia link")));
+  });
+}
+
+function openNewChoice() {
+  openSheet(sheet => {
+    sheet.append(h("h2", null, "Nuovo tabellone"),
+      h("button", { class: "choice", onclick: () => { closeSheet(); go("#new"); } },
+        h("b", null, "Lo scrivo io"), h("span", null, "Scrivi tu i 25 eventi e poi inviti gli amici a giocare.")),
+      h("button", { class: "choice", onclick: () => { closeSheet(); go("#newd"); } },
+        h("b", null, "Creiamolo insieme"), h("span", null, "Ognuno propone e vota gli eventi fino a una scadenza. Alla fine entrano i più votati.")));
+  });
+}
+
 /* ---------- Boot ---------- */
 (async function boot() {
   S.route = parseHash();
@@ -575,9 +944,9 @@ function confetti(canvas) {
     S.user = u; S.me = u ? u.uid : null;
     if (u) S.myNick = u.displayName || lsGet("sukbingo.nick") || S.myNick || "";
     if (S.me !== prev) {
-      stopSubs(); if (S.boardsUnsub) { S.boardsUnsub(); S.boardsUnsub = null; }
+      stopSubs(); stopDraftSubs(); if (S.boardsUnsub) { S.boardsUnsub(); S.boardsUnsub = null; } if (S.draftsUnsub) { S.draftsUnsub(); S.draftsUnsub = null; }
       S.board = null; S.boardLoaded = false; S.players = {}; S.myMarks = null; S.primed = false; S.prevLines = {}; S.joinedChecked = false;
-      if (S.me) { subscribeBoards(); if (S.route.id) subscribeBoard(S.route.id); }
+      if (S.me) { subscribeBoards(); subscribeDrafts(); if (S.route.id) (S.route.name === "draft" ? subscribeDraft : subscribeBoard)(S.route.id); }
     }
     render();
   });
