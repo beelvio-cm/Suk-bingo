@@ -589,7 +589,7 @@ function subscribeDrafts() {
 }
 
 function subscribeDraft(id) {
-  D.draft = null; D.loaded = false; D.entries = []; D.people = {}; D.joined = false; D.tab = "chat"; D.scrollDown = true;
+  D.draft = null; D.loaded = false; D.entries = []; D.people = {}; D.joined = false; D.tab = "chat";
   const t = setTimeout(() => { S.slow = true; render(); }, 10000);
   const ref = F.doc(fdb, "drafts", id);
   D.unsubs.push(F.onSnapshot(ref, d => {
@@ -621,17 +621,43 @@ function subscribeDraft(id) {
   }, 1000);
 }
 
+// Animazione FLIP: ogni proposta scivola dalla vecchia alla nuova posizione; le nuove entrano con un pop.
+function flip(before, hadAny) {
+  if (window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  document.querySelectorAll("[data-eid]").forEach(el => {
+    const old = before[el.dataset.eid];
+    const now = el.getBoundingClientRect().top;
+    if (old == null) {
+      if (hadAny && !el.dataset.eid.startsWith("sep")) { el.classList.add("enter"); el.addEventListener("animationend", () => el.classList.remove("enter"), { once: true }); }
+      return;
+    }
+    const dy = old - now;
+    if (Math.abs(dy) < 1) return;
+    el.style.transition = "none";
+    el.style.transform = "translateY(" + dy + "px)";
+    el.getBoundingClientRect();
+    el.style.transition = "transform .45s cubic-bezier(.2,.8,.2,1)";
+    el.style.transform = "";
+    if (Math.abs(dy) > 40) el.classList.add("moving");
+    el.addEventListener("transitionend", () => { el.style.transition = ""; el.classList.remove("moving"); }, { once: true });
+  });
+}
+
 // Ridisegna senza perdere quello che si sta scrivendo nel campo proposta.
 function renderDraftKeepFocus() {
   if (S.route.name !== "draft") return;
   const inp = document.getElementById("entry-in");
   const val = inp ? inp.value : "", focused = inp && document.activeElement === inp;
   const y = window.scrollY;
+  const before = {};
+  document.querySelectorAll("[data-eid]").forEach(el => { before[el.dataset.eid] = el.getBoundingClientRect().top; });
+  const hadAny = Object.keys(before).length > 0;
   render();
   const n = document.getElementById("entry-in");
   if (n) { n.value = val; if (focused) n.focus({ preventScroll: true }); }
-  if (D.scrollDown) { D.scrollDown = false; const c = document.querySelector(".compose"); if (c) c.scrollIntoView({ block: "end" }); }
-  else window.scrollTo(0, y);
+  window.scrollTo(0, y);
+  flip(before, hadAny);
+  D.justVoted = null;
 }
 
 // Punteggio = pollici su meno pollici giù.
@@ -674,6 +700,7 @@ function toggleVote(entry, dir) {
   const up = new Set(me.up || []), down = new Set(me.down || []);
   const mine = dir > 0 ? up : down, other = dir > 0 ? down : up;
   if (mine.has(entry.id)) mine.delete(entry.id); else { mine.add(entry.id); other.delete(entry.id); }
+  D.justVoted = entry.id;
   savePerson(D.draft.id, { up: [...up], down: [...down] });
   renderDraftKeepFocus();
 }
@@ -770,16 +797,16 @@ function viewDraft() {
   const expired = Date.now() >= d.deadline;
 
   const input = h("input", { class: "input", id: "entry-in", maxlength: "70", placeholder: "Proponi un evento…", enterkeyhint: "send", autocomplete: "off" });
-  const submit = async () => { const v = input.value; if (await addEntry(v)) { input.value = ""; input.focus(); D.scrollDown = true; } };
+  const submit = async () => { const v = input.value; if (await addEntry(v)) { input.value = ""; input.focus(); } };
   input.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
   const tab = D.tab || "chat";
 
   const reactBtns = (e, mine) => {
     const isUp = myUp.has(e.id), isDown = myDown.has(e.id);
     return h("div", { class: "votes" },
-      h("button", { class: "vote up" + (isUp ? " on" : ""), disabled: mine, "aria-pressed": isUp ? "true" : "false", "aria-label": "Pollice su, " + (T.up[e.id] || 0), onclick: ev => { ev.stopPropagation(); toggleVote(e, 1); } },
+      h("button", { class: "vote up" + (isUp ? " on" : "") + (isUp && D.justVoted === e.id ? " pop" : ""), disabled: mine, "aria-pressed": isUp ? "true" : "false", "aria-label": "Pollice su, " + (T.up[e.id] || 0), onclick: ev => { ev.stopPropagation(); toggleVote(e, 1); } },
         h("span", { "aria-hidden": "true" }, "👍"), h("b", null, String(T.up[e.id] || 0))),
-      h("button", { class: "vote down" + (isDown ? " on" : ""), disabled: mine, "aria-pressed": isDown ? "true" : "false", "aria-label": "Pollice giù, " + (T.down[e.id] || 0), onclick: ev => { ev.stopPropagation(); toggleVote(e, -1); } },
+      h("button", { class: "vote down" + (isDown ? " on" : "") + (isDown && D.justVoted === e.id ? " pop" : ""), disabled: mine, "aria-pressed": isDown ? "true" : "false", "aria-label": "Pollice giù, " + (T.down[e.id] || 0), onclick: ev => { ev.stopPropagation(); toggleVote(e, -1); } },
         h("span", { "aria-hidden": "true" }, "👎"), h("b", null, String(T.down[e.id] || 0))));
   };
   const delBtn = e => (e.author === S.me || isCreator) ? h("button", { class: "iconbtn", "aria-label": "Elimina proposta", onclick: async ev => {
@@ -790,30 +817,36 @@ function viewDraft() {
   const votedCount = sorted.filter(e => T.score(e.id) > 0).length;
   const rankPos = {}; sorted.forEach((e, i) => { rankPos[e.id] = i; });
 
-  // Vista chat: le proposte come messaggi, in ordine di arrivo.
-  const chrono = D.entries.slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
-  let lastAuthor = null, lastDay = "";
-  const chat = h("div", { class: "chat", id: "chat" }, chrono.length ? chrono.flatMap(e => {
+  // Vista chat: in alto le proposte che devi ancora votare (le più recenti prima),
+  // sotto quelle già votate o tue, più compatte e ordinate per saldo.
+  const myVoted = e => e.author === S.me || myUp.has(e.id) || myDown.has(e.id);
+  const toVote = D.entries.filter(e => !myVoted(e)).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const done = D.entries.filter(myVoted).sort((a, b) => T.score(b.id) - T.score(a.id) || (b.createdAt || 0) - (a.createdAt || 0));
+  const bubbleFor = (e, compact) => {
     const mine = e.author === S.me, sc = T.score(e.id);
-    const day = new Date(e.createdAt || 0).toLocaleDateString("it-IT", { weekday: "long", day: "numeric", month: "long" });
-    const out = [];
-    if (day !== lastDay) { out.push(h("div", { class: "daysep" }, day)); lastDay = day; lastAuthor = null; }
-    const first = e.author !== lastAuthor; lastAuthor = e.author;
-    const bubble = h("div", { class: "bubble" + (mine ? " me" : "") + (rankPos[e.id] < 25 && sc > 0 ? " in" : "") + (sc < 0 ? " neg" : "") },
-      (!mine && first) ? h("div", { class: "who-n", style: "color:" + colorOf(e.author) }, e.authorNick || "Giocatore") : null,
+    const bubble = h("div", { class: "bubble" + (compact ? " compact" : "") + (rankPos[e.id] < 25 && sc > 0 ? " in" : "") + (sc < 0 ? " neg" : "") },
+      h("div", { class: "who-n", style: mine ? null : "color:" + colorOf(e.author) }, (mine ? "Tu" : (e.authorNick || "Giocatore")) + (e.createdAt ? " · " + fmtTime(e.createdAt) : "")),
       h("div", { class: "btext" }, e.text),
-      h("div", { class: "bmeta" }, reactBtns(e, mine), h("span", { class: "spacer" }), delBtn(e), h("time", null, fmtTime(e.createdAt))));
+      h("div", { class: "bmeta" }, reactBtns(e, mine), h("span", { class: "spacer" }), sc !== 0 && compact ? h("span", { class: "score" + (sc > 0 ? " pos" : " neg") }, (sc > 0 ? "+" : "") + sc) : null, delBtn(e)));
     attachPress(bubble, () => {}, () => openVoters(e));
-    out.push(h("div", { class: "msg" + (mine ? " me" : "") + (first ? " first" : "") },
-      !mine ? (first ? h("span", { class: "chip", style: "background:" + colorOf(e.author), "aria-hidden": "true" }, initials(e.authorNick)) : h("span", { class: "chip ghost" })) : null,
-      bubble));
-    return out;
-  }) : h("div", { class: "empty" }, "Ancora nessuna proposta. Scrivi la prima qui sotto: gli altri potranno reagire con 👍 o 👎."));
+    return h("div", { class: "msg" + (mine ? " me" : ""), "data-eid": e.id },
+      !mine ? h("span", { class: "chip", style: "background:" + colorOf(e.author), "aria-hidden": "true" }, initials(e.authorNick)) : null,
+      bubble);
+  };
+  const doneOpen = D.doneOpen !== false;
+  const chat = h("div", { class: "chat", id: "chat" },
+    D.entries.length ? [
+      h("div", { class: "groupsep", "data-eid": "sep-todo" }, toVote.length ? "Da votare · " + toVote.length : "Hai votato tutto 🎉"),
+      toVote.map(e => bubbleFor(e, false)),
+      done.length ? h("button", { class: "groupsep toggle", "data-eid": "sep-done", "aria-expanded": doneOpen ? "true" : "false", onclick: () => { D.doneOpen = !doneOpen; renderDraftKeepFocus(); } },
+        "Già votate o tue · " + done.length, h("span", { class: "chev" + (doneOpen ? " open" : "") }, "›")) : null,
+      doneOpen ? done.map(e => bubbleFor(e, true)) : null,
+    ] : h("div", { class: "empty" }, "Ancora nessuna proposta. Scrivi la prima qui sopra: gli altri potranno reagire con 👍 o 👎."));
 
   // Vista classifica: stesso ordine usato alla chiusura.
   const list = h("div", { class: "elist" }, sorted.length ? sorted.map((e, idx) => {
     const sc = T.score(e.id), mine = e.author === S.me;
-    const row = h("div", { class: "entry" + (idx < 25 && sc > 0 ? " in" : "") + (sc < 0 ? " neg" : "") },
+    const row = h("div", { class: "entry" + (idx < 25 && sc > 0 ? " in" : "") + (sc < 0 ? " neg" : ""), "data-eid": e.id },
       h("span", { class: "rank" }, String(idx + 1)),
       h("div", { class: "etext" }, h("span", null, e.text), h("small", null, (mine ? "tua proposta" : "di " + (e.authorNick || "Giocatore")) + " · saldo " + (sc > 0 ? "+" : "") + sc)),
       reactBtns(e, mine));
@@ -842,10 +875,10 @@ function viewDraft() {
   if (expired && !sorted.length) out.push(h("div", { class: "banner warn" }, "Tempo scaduto senza proposte. " + (isCreator ? "Allunga la scadenza qui sotto." : "Il creatore può allungare la scadenza.")));
   out.push(
     h("div", { class: "tabs", role: "tablist" },
-      h("button", { class: "tab" + (tab === "chat" ? " on" : ""), role: "tab", "aria-selected": tab === "chat" ? "true" : "false", onclick: () => { D.tab = "chat"; D.scrollDown = true; render(); } }, "Proposte (" + sorted.length + ")"),
+      h("button", { class: "tab" + (tab === "chat" ? " on" : ""), role: "tab", "aria-selected": tab === "chat" ? "true" : "false", onclick: () => { D.tab = "chat"; render(); } }, "Proposte (" + sorted.length + ")"),
       h("button", { class: "tab" + (tab === "rank" ? " on" : ""), role: "tab", "aria-selected": tab === "rank" ? "true" : "false", onclick: () => { D.tab = "rank"; render(); } }, "Classifica")),
     h("div", { class: "hint", style: "text-align:left" }, summary + " Tieni premuto su una proposta per vedere chi l'ha votata."));
-  if (tab === "chat") out.push(chat, h("div", { class: "compose" }, input, h("button", { class: "btn primary", onclick: submit, "aria-label": "Invia proposta" }, "Invia")));
+  if (tab === "chat") out.push(h("div", { class: "compose" }, input, h("button", { class: "btn primary", onclick: submit, "aria-label": "Invia proposta" }, "Invia")), chat);
   else out.push(list);
   out.push(
     h("div", { class: "players" }, h("h3", null, "Partecipanti"), h("div", { class: "plist" }, ppl.length ? ppl.map(([uid, p]) =>

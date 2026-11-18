@@ -227,23 +227,40 @@ details.bulk[open] { display: flex; flex-direction: column; gap: 8px; }
 .tab.on { background: var(--paper); color: var(--indigo); box-shadow: var(--shadow); }
 .chat { display: flex; flex-direction: column; gap: 3px; }
 .daysep { align-self: center; font-size: 11.5px; font-weight: 600; color: var(--muted); background: var(--indigo-soft); border-radius: 999px; padding: 3px 10px; margin: 8px 0 4px; }
-.msg { display: flex; align-items: flex-end; gap: 7px; max-width: 88%; }
+.msg { display: flex; align-items: flex-end; gap: 7px; width: 94%; will-change: transform; }
+.msg.moving .bubble { box-shadow: 0 12px 28px -12px rgba(30,20,80,.45); }
+.msg.enter { animation: enter .45s cubic-bezier(.2,1.4,.4,1); }
+@keyframes enter { from { opacity: 0; transform: translateY(-14px) scale(.94); } }
+.groupsep { display: flex; align-items: center; gap: 8px; font-size: 11.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); margin: 12px 0 4px; background: none; border: 0; padding: 0; text-align: left; }
+.groupsep::after { content: ""; flex: 1; height: 1px; background: var(--line); order: 2; }
+.groupsep .chev { order: 3; display: inline-block; transition: transform .25s; font-size: 16px; }
+.groupsep .chev.open { transform: rotate(90deg); }
+.bubble.compact { padding: 5px 9px 5px; gap: 3px; }
+.bubble.compact .btext { font-size: 13.5px; font-weight: 600; }
+.bubble.compact .who-n { font-size: 11px; }
+.score { font-size: 12px; font-weight: 800; font-variant-numeric: tabular-nums; padding: 1px 6px; border-radius: 6px; }
+.score.pos { color: var(--mint-ink); background: var(--mine); }
+.score.neg { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, var(--paper)); }
+.vote.pop span { display: inline-block; animation: pop .35s cubic-bezier(.3,1.8,.5,1); }
+@keyframes pop { 40% { transform: scale(1.5) rotate(-12deg); } }
+@media (prefers-reduced-motion: reduce) { .msg.enter, .vote.pop span { animation: none; } .msg { transition: none !important; } }
 .msg.first { margin-top: 6px; }
 .msg.me { align-self: flex-end; }
 .msg .chip { width: 28px; height: 28px; font-size: 12px; box-shadow: none; flex: none; }
 .msg .chip.ghost { visibility: hidden; }
-.bubble { background: var(--paper); border: 1.5px solid var(--line); border-radius: 16px 16px 16px 5px; padding: 7px 10px 6px; display: flex; flex-direction: column; gap: 5px; min-width: 0; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.bubble { background: var(--paper); border: 1.5px solid var(--line); border-radius: 16px 16px 16px 5px; padding: 6px 8px 6px 11px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 8px; row-gap: 1px; min-width: 0; flex: 1; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 .msg.me .bubble { background: var(--indigo-soft); border-color: color-mix(in srgb, var(--indigo) 35%, var(--line)); border-radius: 16px 16px 5px 16px; }
 .bubble.in { box-shadow: inset 3px 0 0 var(--mint); }
 .bubble.neg .btext { opacity: .6; }
-.who-n { font-size: 12.5px; font-weight: 700; }
+.who-n { font-size: 12px; font-weight: 700; color: var(--muted); }
 .btext { font-weight: 600; font-size: 15px; overflow-wrap: anywhere; }
-.bmeta { display: flex; align-items: center; gap: 6px; }
-.bmeta .spacer { flex: 1; }
+.who-n { grid-column: 1 / -1; }
+.bmeta { display: flex; align-items: center; gap: 4px; }
+.bmeta .spacer { display: none; }
 .bmeta time { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .bubble .vote { padding: 2px 7px; font-size: 12px; }
 .bubble .iconbtn { font-size: 17px; padding: 0 4px; }
-.compose { position: sticky; bottom: env(safe-area-inset-bottom, 0px); display: flex; gap: 8px; background: var(--bg); padding: 8px 0; z-index: 5; }
+.compose { position: sticky; top: env(safe-area-inset-top, 0px); display: flex; gap: 8px; background: var(--bg); padding: 8px 0; z-index: 5; }
 .compose .input { flex: 1; min-width: 0; border-radius: 999px; padding-inline: 16px; }
 .compose .btn { border-radius: 999px; }
 .rank { width: 24px; text-align: center; font-weight: 800; color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
