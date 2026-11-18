@@ -797,7 +797,13 @@ function viewDraft() {
   const expired = Date.now() >= d.deadline;
 
   const input = h("input", { class: "input", id: "entry-in", maxlength: "70", placeholder: "Proponi un evento…", enterkeyhint: "send", autocomplete: "off" });
-  const submit = async () => { const v = input.value; if (await addEntry(v)) { input.value = ""; input.focus(); } };
+  // Svuota subito il campo (la lista si ridisegna mentre salva); se il salvataggio fallisce, rimette il testo.
+  const submit = async () => {
+    const v = input.value; if (!v.trim()) return;
+    const cur = () => document.getElementById("entry-in");
+    cur().value = ""; cur().focus();
+    if (!(await addEntry(v)) && cur() && !cur().value) cur().value = v;
+  };
   input.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
   const tab = D.tab || "chat";
 
