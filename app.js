@@ -729,8 +729,14 @@ function rankEntries(entries, score) {
 }
 function pickCells(entries, score) {
   const chosen = rankEntries(entries, score).slice(0, 25);
-  const base = chosen.slice();
-  while (chosen.length < 25) chosen.push(base[Math.floor(Math.random() * base.length)]);
+  // Ripetizioni: ognuna al massimo 2 volte; si sale a 3, 4… solo se le proposte sono troppo poche.
+  const base = chosen.slice(), used = new Map(base.map(e => [e.id, 1]));
+  for (let cap = 2; chosen.length < 25; cap++) {
+    for (const e of shuffle(base)) {
+      if (chosen.length >= 25) break;
+      if (used.get(e.id) < cap) { chosen.push(e); used.set(e.id, used.get(e.id) + 1); }
+    }
+  }
   return shuffle(chosen.map(e => e.text));
 }
 
