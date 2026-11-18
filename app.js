@@ -2,8 +2,7 @@ import { firebaseConfig } from "./config.js";
 
 const FB = "https://www.gstatic.com/firebasejs/10.12.2/";
 
-const SAMPLE_TITLE = "SUK Bingo";
-const SAMPLE = ["Promising Future che gira Aurora","SUK mirror match","Turno 3 Aurora","MASTER YI","Oppo con fatine","Judge call con Peppe","Volpe e Bellows","Feature match","Partita ai turni","Oppo non si presenta","Onslaught + punch first","Triplo defy in un turno","Stacked into Nocturne turno 1","IVERN","Decree incident","Newrof nominato ma non dai","Falling Star prese 6+ in match","Baron scam a 5","Oppo con Legend signed o metallica","Partita contro pro o content creator","Oppo con mazzo full cinese","Decreto del colore opposto preso","REK'SAI che gira doppio under Titan","Baron scam di Harrowing","Partita contro donna"];
+const USER_DOMAIN = "@utenti.suk-bingo.app"; // account con solo nome utente
 
 const LINES = [];
 for (let r = 0; r < 5; r++) LINES.push({ k: "r" + r, cells: [0,1,2,3,4].map(c => r * 5 + c), label: "riga " + (r + 1) });
@@ -54,8 +53,8 @@ function colorOf(uid) { let x = 0; for (const ch of uid || "") x = (x * 31 + ch.
 function fmtTime(ts) { if (!ts) return ""; return new Date(ts).toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" }); }
 function authErrMsg(e) {
   const c = (e && e.code) || "";
-  if (c.includes("invalid-credential") || c.includes("wrong-password") || c.includes("user-not-found")) return "Email o password non corrette.";
-  if (c.includes("email-already-in-use")) return "Esiste già un account con questa email. Prova ad accedere.";
+  if (c.includes("invalid-credential") || c.includes("wrong-password") || c.includes("user-not-found")) return "Nome utente (o email) o password non corretti.";
+  if (c.includes("email-already-in-use")) return "Questo nome utente o email è già usato. Prova ad accedere o scegline un altro.";
   if (c.includes("weak-password")) return "La password deve avere almeno 6 caratteri.";
   if (c.includes("invalid-email")) return "L'indirizzo email non è valido.";
   if (c.includes("popup-closed") || c.includes("cancelled-popup")) return "";
@@ -229,8 +228,8 @@ function viewAuth() {
   const invited = S.route.name === "board";
   const isReg = S.authMode === "register";
   const err = h("div", { class: "err", role: "alert" }, S.authErr || "");
-  const name = h("input", { class: "input", id: "au-name", autocomplete: "nickname", placeholder: "Il tuo nome", maxlength: "24" });
-  const email = h("input", { class: "input", id: "au-email", type: "email", autocomplete: "email", placeholder: "Email" });
+  const name = h("input", { class: "input", id: "au-name", autocomplete: "nickname", placeholder: "Nome che vedono gli altri (facoltativo)", maxlength: "24" });
+  const email = h("input", { class: "input", id: "au-email", type: "text", autocapitalize: "none", autocorrect: "off", spellcheck: "false", autocomplete: "username", placeholder: "Nome utente o email" });
   const pass = h("input", { class: "input", id: "au-pass", type: "password", autocomplete: isReg ? "new-password" : "current-password", placeholder: "Password (minimo 6 caratteri)" });
   const busy = on => $app.querySelectorAll("button").forEach(b => b.disabled = on);
 
@@ -245,14 +244,18 @@ function viewAuth() {
   }
   async function submit(ev) {
     ev.preventDefault(); err.textContent = "";
-    const em = email.value.trim(), pw = pass.value;
-    if (isReg && !name.value.trim()) { err.textContent = "Scrivi il nome che vedranno gli altri."; name.focus(); return; }
-    if (!em || !pw) { err.textContent = "Inserisci email e password."; return; }
+    const id = email.value.trim(), pw = pass.value;
+    if (!id || !pw) { err.textContent = "Inserisci nome utente (o email) e password."; return; }
+    const isUser = !id.includes("@");
+    const uname = id.toLowerCase();
+    if (isUser && !/^[a-z0-9._-]{3,20}$/.test(uname)) { err.textContent = "Il nome utente deve avere da 3 a 20 caratteri: lettere, numeri, punto, trattino o trattino basso, senza spazi."; email.focus(); return; }
+    const em = isUser ? uname + USER_DOMAIN : id;
+    if (isReg && !isUser && !name.value.trim()) { err.textContent = "Scrivi il nome che vedranno gli altri."; name.focus(); return; }
     busy(true);
     try {
       if (isReg) {
         const cred = await F.createUserWithEmailAndPassword(auth, em, pw);
-        const nick = name.value.trim();
+        const nick = name.value.trim() || id;
         await F.updateProfile(cred.user, { displayName: nick });
         S.myNick = nick; lsSet("sukbingo.nick", nick); render();
       } else {
@@ -263,6 +266,7 @@ function viewAuth() {
   async function reset() {
     const em = email.value.trim();
     if (!em) { err.textContent = "Scrivi la tua email qui sopra, poi tocca di nuovo “Password dimenticata”."; email.focus(); return; }
+    if (!em.includes("@")) { err.textContent = "Per gli account con solo nome utente non si può recuperare la password: creane uno nuovo oppure chiedi al creatore del gioco."; return; }
     try { await F.sendPasswordResetEmail(auth, em); toast("Ti ho mandato un'email per reimpostare la password."); }
     catch (e) { err.textContent = authErrMsg(e); }
   }
@@ -273,9 +277,10 @@ function viewAuth() {
       h("p", { class: "hint", style: "font-size:15px;color:var(--ink)" }, invited ? "Sei stato invitato a una partita. Accedi per entrare nel tabellone." : "Accedi per creare un tabellone e giocare con gli amici."),
       h("div", { class: "card" },
         h("button", { class: "btn wide", onclick: google }, googleIcon(), "Continua con Google"),
-        h("div", { class: "or" }, "oppure con email"),
+        h("div", { class: "or" }, "oppure con nome utente o email"),
         h("form", { onsubmit: submit, style: "display:flex;flex-direction:column;gap:10px", novalidate: true },
-          isReg ? name : null, email, pass,
+          email, pass, isReg ? name : null,
+          isReg ? h("div", { class: "hint", style: "text-align:left" }, "Con un nome utente non serve nessuna email. Ricordati la password: non si può recuperare.") : null,
           h("button", { class: "btn primary wide", type: "submit" }, isReg ? "Crea account" : "Accedi")),
         err,
         h("div", { class: "row", style: "justify-content:space-between" },
@@ -293,10 +298,9 @@ function viewHome() {
   if (!S.boardsLoaded) out.push(h("div", { class: "spinner" }, "Caricamento tabelloni…"));
   else if (!S.boards.length) {
     out.push(h("div", { class: "empty" },
-      h("div", null, "Qui compaiono i tabelloni che crei e quelli a cui ti invitano. Crea il primo, oppure parti dagli eventi d'esempio del SUK."),
+      h("div", null, "Qui compaiono i tabelloni che crei e quelli a cui ti invitano. Crea il primo e manda il link agli amici."),
       h("div", { class: "row", style: "justify-content:center" },
-        h("button", { class: "btn primary", onclick: () => go("#new") }, "Crea tabellone"),
-        h("button", { class: "btn", onclick: () => { S.prefill = { title: SAMPLE_TITLE, cells: SAMPLE.slice() }; go("#new"); } }, "Usa l'esempio"))));
+        h("button", { class: "btn primary", onclick: () => go("#new") }, "Crea tabellone"))));
   } else {
     out.push(h("div", { class: "blist" }, S.boards.map(b => {
       const mini = h("div", { class: "mini", "aria-hidden": "true" }, Array.from({ length: 25 }, (_, i) => h("i", { class: i === 12 ? "c" : "" })));
@@ -316,7 +320,6 @@ function viewEdit() {
   if (editing && !canEditBoard(S.board)) return [topbar(), h("div", { class: "empty" }, "Solo chi ha creato il tabellone può modificarlo.")];
   let title = "", cells = Array(25).fill("");
   if (editing && S.board) { title = S.board.title || ""; cells = (S.board.cells || []).slice(0, 25); while (cells.length < 25) cells.push(""); }
-  if (!editing && S.prefill) { title = S.prefill.title; cells = S.prefill.cells.slice(0, 25); S.prefill = null; }
 
   const titleIn = h("input", { class: "input", id: "ed-title", maxlength: "60", placeholder: "Es. Torneo di sabato", value: title });
   const areas = cells.map((c, i) => { const ta = h("textarea", { id: "ed-c" + i, class: i === 12 ? "center" : "", maxlength: "70", "aria-label": "Casella " + (i + 1), placeholder: i === 12 ? "centro" : "" }); ta.value = c; return ta; });
@@ -346,8 +349,7 @@ function viewEdit() {
     h("div", { class: "field" }, h("label", { for: "ed-title" }, "Nome"), titleIn),
     h("div", { class: "field" }, h("label", null, "Caselle"), h("div", { class: "egrid" }, areas)),
     h("div", { class: "row" },
-      h("button", { class: "btn", onclick: () => { const v = areas.map(a => a.value); const center = v[12]; const o = shuffle(v.filter((_, i) => i !== 12)); o.splice(12, 0, center); o.forEach((x, i) => areas[i].value = x); } }, "Mescola"),
-      !editing ? h("button", { class: "btn", onclick: () => { titleIn.value = titleIn.value || SAMPLE_TITLE; SAMPLE.forEach((v, i) => areas[i].value = v); } }, "Usa l'esempio") : null),
+      h("button", { class: "btn", onclick: () => { const v = areas.map(a => a.value); const center = v[12]; const o = shuffle(v.filter((_, i) => i !== 12)); o.splice(12, 0, center); o.forEach((x, i) => areas[i].value = x); } }, "Mescola")),
     h("details", { class: "bulk" }, h("summary", null, "Incolla una lista di eventi"), bulk,
       h("button", { class: "btn", onclick: () => {
         const lines = bulk.value.split(/\n/).map(s => s.replace(/^[-*•\d.)\s]+/, "").trim()).filter(Boolean).slice(0, 25);
@@ -491,7 +493,7 @@ function openJoin(after) {
 function openAccount() {
   openSheet(sheet => {
     sheet.append(h("h2", null, S.myNick || "Il tuo account"),
-      h("p", { class: "hint", style: "text-align:left;margin:0" }, (S.user && S.user.email) || ""),
+      h("p", { class: "hint", style: "text-align:left;margin:0" }, (S.user && S.user.email && S.user.email.endsWith(USER_DOMAIN)) ? "Nome utente: " + S.user.email.slice(0, -USER_DOMAIN.length) : ((S.user && S.user.email) || "")),
       h("div", { class: "row", style: "justify-content:flex-end" },
         h("button", { class: "btn", onclick: () => openJoin() }, "Cambia nome"),
         h("button", { class: "btn danger", onclick: async () => { closeSheet(); await F.signOut(auth); } }, "Esci")));

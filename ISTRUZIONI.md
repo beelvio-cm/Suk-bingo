@@ -32,7 +32,7 @@ Il sito sarà su `https://<nome-progetto>.web.app`.
 
 ## 3. Gioca
 - Apri il sito, accedi, crea un tabellone e premi **Invita**: il link porta gli amici direttamente al tabellone.
-- Gli amici accedono con Google o con email e password, senza nient'altro da installare.
+- Gli amici accedono con Google, con email e password, oppure solo con nome utente e password (senza email; in questo caso la password non si può recuperare).
 - Sul telefono: menu del browser → **Aggiungi a schermata Home** (Android: *Installa app*). Si apre a schermo intero come un'app.
 
 ## Come funziona la privacy
