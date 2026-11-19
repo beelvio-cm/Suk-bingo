@@ -48,7 +48,9 @@ function initials(nick) { const p = (nick || "?").trim(); return p ? [...p][0].t
 function sizeClass(t) { const n = (t || "").length; return n <= 12 ? "s-xl" : n <= 24 ? "s-l" : n <= 40 ? "s-m" : "s-s"; }
 function newId() { const a = "abcdefghijkmnpqrstuvwxyz23456789"; let s = ""; for (let i = 0; i < 10; i++) s += a[Math.floor(Math.random() * a.length)]; return s; }
 function shuffle(arr) { const a = arr.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
-function completed(marks) { const s = new Set(marks || []); return LINES.filter(l => l.cells.every(c => s.has(c))); }
+const JOLLY = 12; // la casella centrale è un jolly: vale come segnata per tutti
+const realMarks = marks => (marks || []).filter(m => m !== JOLLY);
+function completed(marks) { const s = new Set(marks || []); s.add(JOLLY); return LINES.filter(l => l.cells.every(c => s.has(c))); }
 function colorOf(uid) { let x = 0; for (const ch of uid || "") x = (x * 31 + ch.charCodeAt(0)) >>> 0; return PLAYER_COLORS[x % PLAYER_COLORS.length]; }
 function fmtTime(ts) { if (!ts) return ""; return new Date(ts).toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" }); }
 function authErrMsg(e) {
@@ -176,6 +178,7 @@ async function saveMine() {
 }
 
 function toggleCell(i) {
+  if (i === JOLLY) return;
   if (!S.me) return;
   if (!S.myNick) { openJoin(() => toggleCell(i)); return; }
   if (S.myMarks === null) S.myMarks = new Set((S.players[S.me] || {}).marks || []);
@@ -337,13 +340,16 @@ function viewEdit() {
   if (editing && S.board) { title = S.board.title || ""; cells = (S.board.cells || []).slice(0, 25); while (cells.length < 25) cells.push(""); }
 
   const titleIn = h("input", { class: "input", id: "ed-title", maxlength: "60", placeholder: "Es. Torneo di sabato", value: title });
-  const areas = cells.map((c, i) => { const ta = h("textarea", { id: "ed-c" + i, class: i === 12 ? "center" : "", maxlength: "70", "aria-label": "Casella " + (i + 1), placeholder: i === 12 ? "centro" : "" }); ta.value = c; return ta; });
-  const bulk = h("textarea", { class: "input", id: "ed-bulk", placeholder: "Un evento per riga (fino a 25)" });
+  const areas = cells.map((c, i) => {
+    if (i === JOLLY) { const ta = h("textarea", { id: "ed-c" + i, class: "center jolly", readonly: true, tabindex: "-1", "aria-label": "Jolly" }); ta.value = "★ JOLLY"; return ta; }
+    const ta = h("textarea", { id: "ed-c" + i, maxlength: "70", "aria-label": "Casella " + (i + 1) }); ta.value = c; return ta;
+  });
+  const bulk = h("textarea", { class: "input", id: "ed-bulk", placeholder: "Un evento per riga (fino a 24)" });
   const status = h("div", { class: "hint", role: "status" });
 
   async function save(ev) {
     const btn = ev.currentTarget;
-    const filled = areas.map(a => a.value.trim());
+    const filled = areas.map((a, i) => i === JOLLY ? "JOLLY" : a.value.trim());
     const t = titleIn.value.trim() || "Bingo";
     const empties = filled.filter(s => !s).length;
     if (empties) { status.textContent = "Mancano " + empties + " caselle da riempire."; areas[filled.findIndex(s => !s)].focus(); return; }
@@ -360,15 +366,16 @@ function viewEdit() {
   return [
     topbar(h("button", { class: "btn ghost", onclick: () => go(editing ? "#b-" + editing : "#") }, "Annulla")),
     h("div", { class: "hero" }, h("h1", { style: "font-size:clamp(28px,8vw,40px)" }, editing ? "Modifica tabellone" : "Nuovo tabellone"),
-      h("p", null, "Scrivi 25 eventi. La casella centrale è quella speciale, evidenziata.")),
+      h("p", null, "Scrivi 24 eventi. La casella centrale è il jolly: vale come già segnata per tutti.")),
     h("div", { class: "field" }, h("label", { for: "ed-title" }, "Nome"), titleIn),
     h("div", { class: "field" }, h("label", null, "Caselle"), h("div", { class: "egrid" }, areas)),
     h("div", { class: "row" },
       h("button", { class: "btn", onclick: () => { const v = areas.map(a => a.value); const center = v[12]; const o = shuffle(v.filter((_, i) => i !== 12)); o.splice(12, 0, center); o.forEach((x, i) => areas[i].value = x); } }, "Mescola")),
     h("details", { class: "bulk" }, h("summary", null, "Incolla una lista di eventi"), bulk,
       h("button", { class: "btn", onclick: () => {
-        const lines = bulk.value.split(/\n/).map(s => s.replace(/^[-*•\d.)\s]+/, "").trim()).filter(Boolean).slice(0, 25);
-        lines.forEach((v, i) => areas[i].value = v); status.textContent = lines.length + " eventi inseriti.";
+        const lines = bulk.value.split(/\n/).map(s => s.replace(/^[-*•\d.)\s]+/, "").trim()).filter(Boolean).slice(0, 24);
+        const slots = areas.filter((_, i) => i !== JOLLY);
+        lines.forEach((v, i) => slots[i].value = v); status.textContent = lines.length + " eventi inseriti.";
       } }, "Riempi le caselle")),
     h("div", { class: "row", style: "justify-content:flex-end" }, h("button", { class: "btn primary", onclick: save }, editing ? "Salva modifiche" : "Crea e apri")),
     status,
@@ -381,7 +388,7 @@ function viewBoard() {
   if (!b) return [topbar(), h("div", { class: "empty" }, "Questo tabellone non esiste più, oppure il link è sbagliato.", h("button", { class: "btn", onclick: () => go("#") }, "I tuoi tabelloni"))];
 
   const byCell = Array.from({ length: 25 }, () => []);
-  for (const [uid, p] of Object.entries(S.players)) for (const m of p.marks || []) if (byCell[m]) byCell[m].push(uid);
+  for (const [uid, p] of Object.entries(S.players)) for (const m of realMarks(p.marks)) if (byCell[m]) byCell[m].push(uid);
   const mine = S.myMarks || new Set((S.players[S.me] || {}).marks || []);
 
   const right = [
@@ -389,6 +396,8 @@ function viewBoard() {
     canEditBoard(b) ? h("button", { class: "btn ghost", onclick: () => go("#edit-" + b.id) }, "Modifica") : null,
   ];
   const grid = h("div", { class: "grid", role: "grid", "aria-label": "Tabellone" }, (b.cells || []).slice(0, 25).map((txt, i) => {
+    if (i === JOLLY) return h("div", { class: "cell center jolly" + (S.winCells.has(i) ? " win" : ""), "aria-label": "Jolly: vale come segnata per tutti" },
+      h("span", { class: "star", "aria-hidden": "true" }, "★"), h("span", { class: "txt" }, "JOLLY"));
     const others = byCell[i].filter(u => u !== S.me);
     const isMine = mine.has(i);
     const cls = ["cell", sizeClass(txt), i === 12 ? "center" : "", isMine ? "mine" : "", S.popCell === i ? "pop" : "", S.winCells.has(i) ? "win" : ""].join(" ");
@@ -409,7 +418,7 @@ function viewBoard() {
     return h("span", { class: "pchip" },
       h("span", { class: "chip", style: "background:" + colorOf(uid) }, initials(p.nick)),
       (p.nick || "Giocatore") + (uid === S.me ? " (tu)" : ""),
-      h("span", { class: "n" }, (p.marks || []).length + "/25"),
+      h("span", { class: "n" }, realMarks(p.marks).length + "/24"),
       lines ? h("span", { class: "b" }, lines > 1 ? "BINGO ×" + lines : "BINGO") : null);
   }) : h("span", { class: "hint" }, "Nessuno ha ancora segnato una casella."));
 
@@ -735,16 +744,19 @@ function rankEntries(entries, score) {
   ];
 }
 function pickCells(entries, score) {
-  const chosen = rankEntries(entries, score).slice(0, 25);
+  const N = 24; // + il jolly al centro
+  const chosen = rankEntries(entries, score).slice(0, N);
   // Ripetizioni: ognuna al massimo 2 volte; si sale a 3, 4… solo se le proposte sono troppo poche.
   const base = chosen.slice(), used = new Map(base.map(e => [e.id, 1]));
-  for (let cap = 2; chosen.length < 25; cap++) {
+  for (let cap = 2; chosen.length < N; cap++) {
     for (const e of shuffle(base)) {
-      if (chosen.length >= 25) break;
+      if (chosen.length >= N) break;
       if (used.get(e.id) < cap) { chosen.push(e); used.set(e.id, used.get(e.id) + 1); }
     }
   }
-  return shuffle(chosen.map(e => e.text));
+  const cells = shuffle(chosen.map(e => e.text));
+  cells.splice(JOLLY, 0, "JOLLY");
+  return cells;
 }
 
 async function finalizeDraft(id) {
@@ -844,7 +856,7 @@ function viewDraft() {
   const done = D.entries.filter(myVoted).sort((a, b) => T.score(b.id) - T.score(a.id) || (b.createdAt || 0) - (a.createdAt || 0));
   const bubbleFor = (e, compact) => {
     const mine = e.author === S.me, sc = T.score(e.id);
-    const bubble = h("div", { class: "bubble" + (compact ? " compact" : "") + (rankPos[e.id] < 25 && sc > 0 ? " in" : "") + (sc < 0 ? " neg" : "") },
+    const bubble = h("div", { class: "bubble" + (compact ? " compact" : "") + (rankPos[e.id] < 24 && sc > 0 ? " in" : "") + (sc < 0 ? " neg" : "") },
       h("div", { class: "who-n", style: mine ? null : "color:" + colorOf(e.author) }, (mine ? "Tu" : (e.authorNick || "Giocatore")) + (e.createdAt ? " · " + fmtTime(e.createdAt) : "")),
       h("div", { class: "btext" }, e.text),
       h("div", { class: "bmeta" }, reactBtns(e, mine), h("span", { class: "spacer" }), sc !== 0 && compact ? h("span", { class: "score" + (sc > 0 ? " pos" : " neg") }, (sc > 0 ? "+" : "") + sc) : null, delBtn(e)));
@@ -866,22 +878,22 @@ function viewDraft() {
   // Vista classifica: stesso ordine usato alla chiusura.
   const list = h("div", { class: "elist" }, sorted.length ? sorted.map((e, idx) => {
     const sc = T.score(e.id), mine = e.author === S.me;
-    const row = h("div", { class: "entry" + (idx < 25 && sc > 0 ? " in" : "") + (sc < 0 ? " neg" : ""), "data-eid": e.id },
+    const row = h("div", { class: "entry" + (idx < 24 && sc > 0 ? " in" : "") + (sc < 0 ? " neg" : ""), "data-eid": e.id },
       h("span", { class: "rank" }, String(idx + 1)),
       h("div", { class: "etext" }, h("span", null, e.text), h("small", null, (mine ? "tua proposta" : "di " + (e.authorNick || "Giocatore")) + " · saldo " + (sc > 0 ? "+" : "") + sc)),
       reactBtns(e, mine));
     attachPress(row, () => {}, () => openVoters(e));
     const out = [row];
-    if (idx === 24 && sorted.length > 25) out.push(h("div", { class: "cut" }, "Fin qui entrano nel tabellone"));
+    if (idx === 23 && sorted.length > 24) out.push(h("div", { class: "cut" }, "Fin qui entrano nel tabellone"));
     return out;
   }) : h("div", { class: "empty" }, "Ancora nessuna proposta."));
 
   const ppl = Object.entries(D.people).sort((a, b) => (a[1].joinedAt || 0) - (b[1].joinedAt || 0));
   let summary;
-  if (!sorted.length) summary = "Servono 25 caselle.";
-  else if (votedCount >= 25) summary = sorted.length + " proposte: entrano le 25 con il saldo più alto (👍 meno 👎).";
-  else if (sorted.length >= 25) summary = sorted.length + " proposte, " + votedCount + " con saldo positivo: le altre caselle verranno scelte a caso tra quelle senza voti, e solo alla fine tra quelle bocciate.";
-  else summary = sorted.length + " proposte su 25 caselle: se non ne arrivano altre, alcune verranno ripetute a caso.";
+  if (!sorted.length) summary = "Servono 24 caselle (al centro c'è il jolly).";
+  else if (votedCount >= 24) summary = sorted.length + " proposte: entrano le 24 con il saldo più alto (👍 meno 👎).";
+  else if (sorted.length >= 24) summary = sorted.length + " proposte, " + votedCount + " con saldo positivo: le altre caselle verranno scelte a caso tra quelle senza voti, e solo alla fine tra quelle bocciate.";
+  else summary = sorted.length + " proposte su 24 caselle: se non ne arrivano altre, alcune verranno ripetute a caso.";
 
   const out = [
     topbar([h("button", { class: "btn", onclick: () => openShareDraft(d) }, "Invita")]),
@@ -973,7 +985,7 @@ function openNewChoice() {
   openSheet(sheet => {
     sheet.append(h("h2", null, "Nuovo tabellone"),
       h("button", { class: "choice", onclick: () => { closeSheet(); go("#new"); } },
-        h("b", null, "Lo scrivo io"), h("span", null, "Scrivi tu i 25 eventi e poi inviti gli amici a giocare.")),
+        h("b", null, "Lo scrivo io"), h("span", null, "Scrivi tu i 24 eventi (al centro c'è il jolly) e poi inviti gli amici a giocare.")),
       h("button", { class: "choice", onclick: () => { closeSheet(); go("#newd"); } },
         h("b", null, "Creiamolo insieme"), h("span", null, "Ognuno propone e vota gli eventi fino a una scadenza. Alla fine entrano i più votati.")));
   });

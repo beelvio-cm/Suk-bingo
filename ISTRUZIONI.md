@@ -43,6 +43,6 @@ Il sito sarà su `https://<nome-progetto>.web.app`.
 ## Creare il tabellone insieme
 - **+ Nuovo → Creiamolo insieme**: scegli una scadenza e invita gli amici con il link.
 - Ognuno scrive le proposte come messaggi in una chat; gli altri reagiscono con 👍 o 👎 (un voto per proposta a persona; non si votano le proprie).
-- Alla scadenza (o quando il creatore preme *Chiudi ora*) entrano le proposte con il saldo 👍−👎 più alto; poi, a caso, quelle a zero; per ultime quelle con saldo negativo. Se le proposte sono meno di 25, alcune vengono ripetute a caso, ognuna al massimo 2 volte (di più solo se le proposte sono meno di 13). Le caselle vengono mescolate.
+- Alla scadenza (o quando il creatore preme *Chiudi ora*) entrano le proposte con il saldo 👍−👎 più alto; poi, a caso, quelle a zero; per ultime quelle con saldo negativo. Se le proposte sono meno di 25, alcune vengono ripetute a caso, ognuna al massimo 2 volte (di più solo se le proposte sono meno di 12). La casella centrale è sempre un jolly, già segnata per tutti. Le caselle vengono mescolate.
 - Tutti i partecipanti ricevono in automatico il tabellone, che resta condivisibile con altri.
 - Dopo questo aggiornamento le regole di Firestore vanno ripubblicate (Firestore → Rules) con il contenuto di `firestore.rules`.
