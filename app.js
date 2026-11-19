@@ -647,15 +647,22 @@ function flip(before, hadAny) {
 // Ridisegna senza perdere quello che si sta scrivendo nel campo proposta.
 function renderDraftKeepFocus() {
   if (S.route.name !== "draft") return;
-  const inp = document.getElementById("entry-in");
-  const val = inp ? inp.value : "", focused = inp && document.activeElement === inp;
   const y = window.scrollY;
   const before = {};
   document.querySelectorAll("[data-eid]").forEach(el => { before[el.dataset.eid] = el.getBoundingClientRect().top; });
   const hadAny = Object.keys(before).length > 0;
-  render();
-  const n = document.getElementById("entry-in");
-  if (n) { n.value = val; if (focused) n.focus({ preventScroll: true }); }
+  // Il campo proposta non viene mai ricreato né rifocalizzato: così un aggiornamento
+  // dagli altri (voti, nuove proposte) non apre né chiude la tastiera.
+  const oldCompose = $app.querySelector(":scope > .compose");
+  const nodes = (oldCompose && S.me && D.draft) ? viewDraft() : null;
+  const idx = nodes ? nodes.findIndex(n => n.classList && n.classList.contains("compose")) : -1;
+  if (idx >= 0) {
+    [...$app.children].forEach(c => { if (c !== oldCompose) c.remove(); });
+    oldCompose.before(...nodes.slice(0, idx));
+    oldCompose.after(...nodes.slice(idx + 1));
+  } else {
+    render();
+  }
   window.scrollTo(0, y);
   flip(before, hadAny);
   D.justVoted = null;
